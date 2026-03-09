@@ -106,6 +106,7 @@ else
   install_linux_deps local
   setup_local_postgres
   echo "Local mode: installing deps and running backend (no Docker)..."
+  echo "  Dashboard: http://localhost:8000/dashboard   API docs: http://localhost:8000/docs"
   ROOT="$(pwd)"
   VENV="${VENV:-$ROOT/.venv}"
   PY="$VENV/bin/python"

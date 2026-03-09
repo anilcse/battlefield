@@ -13,8 +13,9 @@ Full-stack foundation for a Polymarket-style prediction trading platform with:
 2. Start (local, no Docker):
    - `./start.sh` — on Linux (Ubuntu/Debian) this installs PostgreSQL, creates the `nof1` database and user, and sets `DATABASE_URL` in `.env`.
    - Or with Docker: `./start.sh docker`
-3. Open API docs:
-   - [http://localhost:8000/docs](http://localhost:8000/docs)
+3. Open in browser:
+   - **Dashboard:** [http://localhost:8000/dashboard](http://localhost:8000/dashboard) (or [http://localhost:8000/](http://localhost:8000/))
+   - **API docs:** [http://localhost:8000/docs](http://localhost:8000/docs)
 
 ## What Is Included
 
