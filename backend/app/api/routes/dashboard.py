@@ -35,7 +35,7 @@ async def dashboard() -> str:
     .wrap { max-width: 1200px; margin: 0 auto; padding: 20px; }
     h1 { margin: 0 0 8px 0; font-size: 28px; }
     p.sub { margin: 0 0 18px 0; color: var(--muted); }
-    .kpi-grid { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 12px; margin-bottom: 14px; }
+    .kpi-grid { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 12px; margin-bottom: 14px; }
     .card { background: rgba(19, 26, 46, 0.9); border: 1px solid #273250; border-radius: 14px; padding: 14px; }
     .kpi-title { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .08em; }
     .kpi-value { margin-top: 8px; font-size: 24px; font-weight: 700; }
@@ -54,9 +54,10 @@ async def dashboard() -> str:
     .progress-bar { background: #1e2740; border-radius: 8px; height: 8px; overflow: hidden; margin-top: 6px; }
     .progress-fill { height: 100%; background: var(--accent); border-radius: 8px; transition: width .3s; }
     .section-title { color: var(--muted); font-size: 13px; text-transform: uppercase; letter-spacing: .08em; margin-bottom: 10px; }
+    .chart-grid-4 { display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px; margin-bottom: 12px; }
     @media (max-width: 1000px) {
       .kpi-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-      .panel-grid, .panel-grid-2 { grid-template-columns: 1fr; }
+      .panel-grid, .panel-grid-2, .chart-grid-4 { grid-template-columns: 1fr; }
     }
   </style>
 </head>
@@ -67,6 +68,8 @@ async def dashboard() -> str:
 
     <div class="kpi-grid">
       <div class="card"><div class="kpi-title">Trades</div><div id="kpi-trades" class="kpi-value">-</div></div>
+      <div class="card"><div class="kpi-title">Success</div><div id="kpi-success" class="kpi-value green">-</div></div>
+      <div class="card"><div class="kpi-title">Fail</div><div id="kpi-fail" class="kpi-value red">-</div></div>
       <div class="card"><div class="kpi-title">Forecasts</div><div id="kpi-forecasts" class="kpi-value">-</div></div>
       <div class="card"><div class="kpi-title">Markets</div><div id="kpi-markets" class="kpi-value">-</div></div>
       <div class="card"><div class="kpi-title">Volume (USD)</div><div id="kpi-volume" class="kpi-value">-</div></div>
@@ -82,6 +85,14 @@ async def dashboard() -> str:
         <div class="kpi-title">Trade Side Mix</div>
         <canvas id="sideMixChart" height="120"></canvas>
       </div>
+    </div>
+
+    <div class="section-title">Model Comparison</div>
+    <div class="chart-grid-4">
+      <div class="card"><div class="kpi-title">Trades by Model</div><canvas id="tradesChart" height="140"></canvas></div>
+      <div class="card"><div class="kpi-title">PnL by Model</div><canvas id="pnlChart" height="140"></canvas></div>
+      <div class="card"><div class="kpi-title">Success vs Fail by Model</div><canvas id="successFailChart" height="140"></canvas></div>
+      <div class="card"><div class="kpi-title">Volume by Model</div><canvas id="volumeChart" height="140"></canvas></div>
     </div>
 
     <div class="card" style="margin-bottom: 12px;">
@@ -105,7 +116,7 @@ async def dashboard() -> str:
       <div class="card">
         <div class="kpi-title">Model Analytics</div>
         <table class="table" id="models-table">
-          <thead><tr><th>Model</th><th>Trades</th><th>Volume USD</th><th>MTM PnL</th><th>Forecasts</th><th>Avg Conf</th></tr></thead>
+          <thead><tr><th>Model</th><th>Trades</th><th>Volume USD</th><th>MTM PnL</th><th>Win/Loss</th><th>Forecasts</th><th>Avg Conf</th></tr></thead>
           <tbody></tbody>
         </table>
       </div>
@@ -113,19 +124,27 @@ async def dashboard() -> str:
   </div>
 
   <script>
-    let dailyChart;
-    let sideChart;
+    let dailyChart, sideChart, tradesChart, pnlChart, successFailChart, volumeChart;
+    const CHART_COLORS = ["#6ea8fe", "#3ddc97", "#ffd93d", "#ff6b6b", "#b388ff"];
 
     function formatUsd(n) {
       return "$" + Number(n || 0).toLocaleString(undefined, { maximumFractionDigits: 2 });
+    }
+
+    function shortModelName(s) {
+      const parts = (s || "").split("/");
+      return parts[parts.length - 1] || s;
     }
 
     async function loadAnalytics() {
       const res = await fetch("/admin/analytics");
       const data = await res.json();
       const ov = data.overview || {};
+      const comp = data.model_comparison || {};
 
       document.getElementById("kpi-trades").textContent = ov.total_trades ?? 0;
+      document.getElementById("kpi-success").textContent = ov.success_trades ?? 0;
+      document.getElementById("kpi-fail").textContent = ov.fail_trades ?? 0;
       document.getElementById("kpi-forecasts").textContent = ov.total_forecasts ?? 0;
       document.getElementById("kpi-markets").textContent = ov.total_markets ?? 0;
       document.getElementById("kpi-volume").textContent = formatUsd(ov.total_volume_usd);
@@ -175,11 +194,58 @@ async def dashboard() -> str:
           <td>${row.trade_count || 0}</td>
           <td>${formatUsd(row.volume_usd)}</td>
           <td class="${pnlClass}">${formatUsd(row.mark_to_market_pnl_usd)}</td>
+          <td>${row.success_trades || 0}/${row.fail_trades || 0}</td>
           <td>${row.forecast_count || 0}</td>
           <td>${((row.avg_confidence || 0) * 100).toFixed(1)}%</td>
         `;
         modelsBody.appendChild(tr);
       });
+
+      const labels = (comp.labels || []).map(shortModelName);
+      const chartOpts = { plugins: { legend: { labels: { color: "#e5ecff" } } }, scales: { x: { ticks: { color: "#9eb0d0", maxRotation: 45 } }, y: { ticks: { color: "#9eb0d0" } } } };
+
+      if (tradesChart) tradesChart.destroy();
+      if (pnlChart) pnlChart.destroy();
+      if (successFailChart) successFailChart.destroy();
+      if (volumeChart) volumeChart.destroy();
+      if (labels.length) {
+      tradesChart = new Chart(document.getElementById("tradesChart"), {
+        type: "bar",
+        data: { labels, datasets: [{ label: "Trades", data: comp.trade_counts || [], backgroundColor: CHART_COLORS }] },
+        options: chartOpts
+      });
+
+      const pnlData = comp.pnl || [];
+      pnlChart = new Chart(document.getElementById("pnlChart"), {
+        type: "bar",
+        data: { labels, datasets: [{ label: "PnL USD", data: pnlData, backgroundColor: pnlData.map(v => (v >= 0 ? "#3ddc97" : "#ff6b6b")) }] },
+        options: chartOpts
+      });
+
+      successFailChart = new Chart(document.getElementById("successFailChart"), {
+        type: "bar",
+        data: {
+          labels,
+          datasets: [
+            { label: "Success", data: comp.success_trades || [], backgroundColor: "#3ddc97" },
+            { label: "Fail", data: comp.fail_trades || [], backgroundColor: "#ff6b6b" }
+          ]
+        },
+        options: {
+          ...chartOpts,
+          scales: {
+            x: { ...chartOpts.scales.x, stacked: true },
+            y: { ...chartOpts.scales.y, stacked: true }
+          }
+        }
+      });
+
+      volumeChart = new Chart(document.getElementById("volumeChart"), {
+        type: "bar",
+        data: { labels, datasets: [{ label: "Volume USD", data: comp.volume_usd || [], backgroundColor: "#6ea8fe" }] },
+        options: chartOpts
+      });
+      }
     }
 
     async function loadLeaderboard() {

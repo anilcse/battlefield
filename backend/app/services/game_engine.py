@@ -25,6 +25,9 @@ from app.models.market import Market
 from app.models.trade import Trade
 from app.models.tournament import Tournament, TournamentEntry
 from app.services.category_classifier import classify_market, market_duration_tag
+
+# Categories with frequent orderbook changes — prioritize for trading
+PRIORITY_CATEGORIES = frozenset({"sports", "weather", "celebrities", "crypto", "crypto_short_term", "economics"})
 from app.services.model_router import run_model_inference
 from app.services.polymarket_client import PolymarketClient
 
@@ -107,15 +110,20 @@ def _build_agent_prompt(
     available_markets: list[dict],
     tournament_days_remaining: int,
     competitor_summary: str,
+    resolved_positions_summary: str = "",
 ) -> str:
     trade_history_str = "None yet — you should start trading!" if not recent_trades else "\n".join(
-        f"  - {t['side']} on \"{t['title']}\" @ ${t['price']:.2f}, qty {t['qty']:.2f} ({t['category']})"
+        f"  - {t['side']} on \"{t['title']}\" @ ${t['price']:.2f}, qty {t['qty']:.2f} ({t['category']}) {t.get('resolution_tag', '[OPEN]')}"
         for t in recent_trades[-15:]
     )
 
+    resolved_section = ""
+    if resolved_positions_summary and resolved_positions_summary.strip() != "  None":
+        resolved_section = f"=== RESOLVED MARKETS (your positions) ===\n{resolved_positions_summary}\n\n"
+
     markets_str = "\n".join(
         f"  [{i+1}] \"{m['title']}\" | Category: {m['category']} | Duration: {m['duration_tag']} "
-        f"| YES: ${m['yes_price']:.2f} | NO: ${m['no_price']:.2f} | End: {m['end_date'] or 'unknown'}"
+        f"| YES: ${m['yes_price']:.2f} | NO: ${m['no_price']:.2f} | End: {m['end_date'] or 'unknown'} | Status: OPEN"
         + (" [ALREADY HELD]" if m["id"] in held_market_ids else "")
         for i, m in enumerate(available_markets)
     )
@@ -130,7 +138,9 @@ def _build_agent_prompt(
         f"  Days remaining: {tournament_days_remaining}\n"
         f"  Scoring: Profit (60%) + Volume (40%). Low performers get ELIMINATED!\n\n"
         f"=== COMPETITOR STANDINGS ===\n{competitor_summary}\n\n"
-        f"=== YOUR RECENT TRADES ===\n{trade_history_str}\n\n"
+        f"=== YOUR RECENT TRADES ===\n{trade_history_str}\n"
+        f"(Tags: [OPEN]=still trading; [RESOLVED: X won — YOU WON/LOST]=outcome known)\n\n"
+        f"{resolved_section}"
         f"=== AVAILABLE MARKETS ({len(available_markets)}) ===\n{markets_str}\n\n"
         f"=== YOUR TASK ===\n"
         f"Pick UP TO {MAX_TRADES_PER_ROUND} markets to trade. You MUST trade at least 1 unless "
@@ -284,6 +294,21 @@ class GameEngine:
         )
         return list(result.scalars().all())
 
+    def _resolution_tag(self, trade_side: str, market_status: str, yes_price: float, no_price: float) -> str:
+        """Return resolution tag for a trade: OPEN or RESOLVED with outcome and win/loss."""
+        status_lower = (market_status or "").lower()
+        if status_lower not in ("closed", "resolved", "finalized"):
+            return "[OPEN]"
+        yes_won = float(yes_price) >= 0.95
+        no_won = float(no_price) >= 0.95
+        if yes_won:
+            won = trade_side.upper() == "YES"
+            return f"[RESOLVED: YES won — {'YOU WON' if won else 'YOU LOST'}]"
+        if no_won:
+            won = trade_side.upper() == "NO"
+            return f"[RESOLVED: NO won — {'YOU WON' if won else 'YOU LOST'}]"
+        return "[RESOLVED: outcome pending]"
+
     async def _get_recent_trades(self, session: AsyncSession, model_name: str, limit: int = 15) -> list[dict]:
         result = await session.execute(
             select(Trade, Market)
@@ -301,6 +326,7 @@ class GameEngine:
                 "qty": float(t.quantity),
                 "category": m.category,
                 "market_id": m.id,
+                "resolution_tag": self._resolution_tag(t.side, m.status, float(m.yes_price), float(m.no_price)),
             }
             for t, m in rows
         ]
@@ -310,6 +336,42 @@ class GameEngine:
             select(Trade.market_id).where(Trade.model_name == model_name).distinct()
         )
         return {row[0] for row in result.all()}
+
+    async def _get_resolved_positions_summary(self, session: AsyncSession, model_name: str, limit: int = 10) -> str:
+        """Summary of markets the agent traded that have resolved (outcome + win/loss)."""
+        result = await session.execute(
+            select(Market, Trade)
+            .join(Trade, Trade.market_id == Market.id)
+            .where(
+                Trade.model_name == model_name,
+                func.lower(Market.status).in_(["closed", "resolved", "finalized"]),
+            )
+            .order_by(Trade.created_at.desc())
+            .limit(limit * 3)
+        )
+        rows = result.all()
+        seen: set[int] = set()
+        lines: list[str] = []
+        for m, t in rows:
+            if m.id in seen:
+                continue
+            seen.add(m.id)
+            yes_won = float(m.yes_price) >= 0.95
+            no_won = float(m.no_price) >= 0.95
+            if yes_won:
+                outcome = "YES won"
+                won = t.side.upper() == "YES"
+            elif no_won:
+                outcome = "NO won"
+                won = t.side.upper() == "NO"
+            else:
+                outcome = "pending"
+                won = False
+            result_str = f"YOU {'WON' if won else 'LOST'}" if outcome != "pending" else outcome
+            lines.append(f"  - \"{m.title[:50]}\": {outcome} — {result_str}")
+            if len(lines) >= limit:
+                break
+        return "\n".join(lines) if lines else "  None"
 
     async def _get_model_volume(self, session: AsyncSession, model_name: str, since: datetime) -> float:
         result = await session.execute(
@@ -424,6 +486,7 @@ class GameEngine:
         held_ids = await self._get_held_market_ids(session, model_name)
         total_volume = await self._get_model_volume(session, model_name, tournament.started_at)
         competitor_summary = self._build_competitor_summary(all_entries, model_name)
+        resolved_summary = await self._get_resolved_positions_summary(session, model_name)
         days_remaining = max(0, (tournament.ends_at - datetime.now(tz=timezone.utc)).days)
 
         agent_markets = list(market_pool)
@@ -442,6 +505,7 @@ class GameEngine:
             available_markets=agent_markets,
             tournament_days_remaining=days_remaining,
             competitor_summary=competitor_summary,
+            resolved_positions_summary=resolved_summary,
         )
 
         try:
@@ -545,7 +609,7 @@ class GameEngine:
                 logger.info("Game engine: no open markets after sync")
                 return
 
-            market_pool = [
+            raw_pool = [
                 {
                     "id": m.id,
                     "polymarket_market_id": m.polymarket_market_id,
@@ -562,6 +626,12 @@ class GameEngine:
                 for m in all_markets
                 if 0.02 < float(m.yes_price) < 0.98
             ]
+
+            priority = [x for x in raw_pool if (x["category"] or "").lower() in PRIORITY_CATEGORIES]
+            other = [x for x in raw_pool if (x["category"] or "").lower() not in PRIORITY_CATEGORIES]
+            random.shuffle(priority)
+            random.shuffle(other)
+            market_pool = priority + other
 
             if not market_pool:
                 logger.info("Game engine: no markets with tradeable prices (all at extremes)")

@@ -21,6 +21,21 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/admin", tags=["admin"])
 
 
+def _is_trade_won(trade: Trade, market: Market) -> bool | None:
+    """True=won, False=lost, None=not yet resolved."""
+    status = (market.status or "").lower()
+    if status not in ("closed", "resolved", "finalized"):
+        return None
+    yes_won = float(market.yes_price) >= 0.95
+    no_won = float(market.no_price) >= 0.95
+    side = (trade.side or "").upper()
+    if yes_won:
+        return side == "YES"
+    if no_won:
+        return side == "NO"
+    return None
+
+
 def _compute_model_portfolios(trades: list[Trade], market_map: dict[int, Market]) -> list[dict]:
     model_stats: dict[str, dict] = {}
     for trade in trades:
@@ -38,6 +53,8 @@ def _compute_model_portfolios(trades: list[Trade], market_map: dict[int, Market]
             {
                 "model_name": model_name,
                 "trade_count": 0,
+                "success_trades": 0,
+                "fail_trades": 0,
                 "volume_usd": 0.0,
                 "cash_spent_usd": 0.0,
                 "yes_exposure_qty": 0.0,
@@ -47,6 +64,12 @@ def _compute_model_portfolios(trades: list[Trade], market_map: dict[int, Market]
         )
         stats["trade_count"] += 1
         stats["volume_usd"] += notional
+
+        won = _is_trade_won(trade, market)
+        if won is True:
+            stats["success_trades"] += 1
+        elif won is False:
+            stats["fail_trades"] += 1
 
         if side == "YES":
             stats["cash_spent_usd"] += notional
@@ -61,6 +84,8 @@ def _compute_model_portfolios(trades: list[Trade], market_map: dict[int, Market]
         {
             "model_name": row["model_name"],
             "trade_count": row["trade_count"],
+            "success_trades": row["success_trades"],
+            "fail_trades": row["fail_trades"],
             "volume_usd": round(row["volume_usd"], 4),
             "cash_spent_usd": round(row["cash_spent_usd"], 4),
             "yes_exposure_qty": round(row["yes_exposure_qty"], 4),
@@ -126,6 +151,8 @@ async def trading_analytics(db: AsyncSession = Depends(get_db)) -> dict:
     total_volume = 0.0
     mtm_pnl = 0.0
     side_counts = {"YES": 0, "NO": 0}
+    success_trades_total = 0
+    fail_trades_total = 0
     source_counts: dict[str, int] = {}
     daily_volume: dict[str, float] = {}
     market_volume: dict[str, float] = {}
@@ -149,6 +176,11 @@ async def trading_analytics(db: AsyncSession = Depends(get_db)) -> dict:
                 mtm_pnl += float(trade.quantity) * (float(market.yes_price) - float(trade.price))
             elif side == "NO":
                 mtm_pnl += float(trade.quantity) * (float(market.no_price) - float(trade.price))
+            won = _is_trade_won(trade, market)
+            if won is True:
+                success_trades_total += 1
+            elif won is False:
+                fail_trades_total += 1
 
     model_forecasts: dict[str, int] = {}
     model_avg_conf: dict[str, float] = {}
@@ -169,6 +201,8 @@ async def trading_analytics(db: AsyncSession = Depends(get_db)) -> dict:
     return {
         "overview": {
             "total_trades": len(trades),
+            "success_trades": success_trades_total,
+            "fail_trades": fail_trades_total,
             "total_forecasts": len(forecasts),
             "total_markets": len(markets),
             "total_volume_usd": round(total_volume, 4),
@@ -189,11 +223,21 @@ async def trading_analytics(db: AsyncSession = Depends(get_db)) -> dict:
                 "forecast_count": model_forecasts.get(name, 0),
                 "avg_confidence": round(model_avg_conf.get(name, 0.0), 4),
                 "trade_count": model_portfolio_map.get(name, {}).get("trade_count", 0),
+                "success_trades": model_portfolio_map.get(name, {}).get("success_trades", 0),
+                "fail_trades": model_portfolio_map.get(name, {}).get("fail_trades", 0),
                 "volume_usd": model_portfolio_map.get(name, {}).get("volume_usd", 0.0),
                 "mark_to_market_pnl_usd": model_portfolio_map.get(name, {}).get("mark_to_market_pnl_usd", 0.0),
             }
             for name in model_names
         ],
+        "model_comparison": {
+            "labels": model_names,
+            "trade_counts": [model_portfolio_map.get(n, {}).get("trade_count", 0) for n in model_names],
+            "pnl": [model_portfolio_map.get(n, {}).get("mark_to_market_pnl_usd", 0.0) for n in model_names],
+            "success_trades": [model_portfolio_map.get(n, {}).get("success_trades", 0) for n in model_names],
+            "fail_trades": [model_portfolio_map.get(n, {}).get("fail_trades", 0) for n in model_names],
+            "volume_usd": [model_portfolio_map.get(n, {}).get("volume_usd", 0.0) for n in model_names],
+        },
     }
 
 
