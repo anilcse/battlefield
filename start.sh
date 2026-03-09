@@ -59,9 +59,19 @@ docker_compose_cmd() {
   fi
 }
 
-if [ "${1:-}" = "local" ]; then
+# Default: local (no Docker). Use ./start.sh docker for Docker.
+if [ "${1:-}" = "docker" ]; then
+  install_linux_deps
+  if ! command -v docker &>/dev/null; then
+    echo "Docker not found and could not install. Run ./start.sh for local mode (no Docker)."
+    exit 1
+  fi
+  echo "Starting with Docker (Postgres + Backend)..."
+  docker_compose_cmd up --build
+else
   install_linux_deps local
-  echo "Local mode: installing deps and running backend..."
+  echo "Local mode: installing deps and running backend (no Docker)..."
+  echo "Ensure Postgres is running and DATABASE_URL in .env points to it."
   VENV="${VENV:-.venv}"
   if [ ! -d "$VENV" ]; then
     python3 -m venv "$VENV"
@@ -71,12 +81,4 @@ if [ "${1:-}" = "local" ]; then
   pip install -q -r backend/requirements.txt
   [ -f .env ] && cp .env backend/.env
   cd backend && exec uvicorn app.main:app --host 0.0.0.0 --port 8000
-else
-  install_linux_deps
-  if ! command -v docker &>/dev/null; then
-    echo "Docker not found and could not install. Run ./start.sh local for Python-only mode (set DATABASE_URL in .env)."
-    exit 1
-  fi
-  echo "Starting with Docker (Postgres + Backend)..."
-  docker_compose_cmd up --build
 fi

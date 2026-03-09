@@ -5,8 +5,6 @@ auto-trade when they find edge. PnL is tracked per-model.
 """
 import asyncio
 import logging
-import threading
-import time
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
@@ -56,7 +54,6 @@ class GameEngine:
     def __init__(self) -> None:
         self.settings = get_settings()
         self.running = False
-        self._thread: Optional[threading.Thread] = None
         self.polymarket_client = PolymarketClient()
 
     async def _ensure_active_tournament(self, session: AsyncSession) -> Tournament:
@@ -250,44 +247,49 @@ class GameEngine:
             await self._rank_entries(session, tournament.id)
             await session.commit()
 
-    def _loop(self) -> None:
+    async def _run_forever(self) -> None:
         while self.running:
             try:
-                asyncio.run(self._run_round())
+                await self._run_round()
+            except asyncio.CancelledError:
+                break
             except Exception as exc:
                 logger.error("Game engine loop error: %s", exc)
-            time.sleep(self.settings.game_loop_interval_seconds)
-
-    def start(self) -> None:
-        if self.running:
-            return
-        self.running = True
-        self._thread = threading.Thread(target=self._loop, daemon=True, name="game-engine")
-        self._thread.start()
-        logger.info(
-            "Game engine started (interval=%ss, models=%s)",
-            self.settings.game_loop_interval_seconds,
-            len(self.settings.model_names),
-        )
-
-    def stop(self) -> None:
-        self.running = False
+            if self.running:
+                await asyncio.sleep(self.settings.game_loop_interval_seconds)
 
 
 _game_engine: Optional[GameEngine] = None
+_game_task: Optional[asyncio.Task] = None
 
 
-def start_game_engine() -> None:
-    global _game_engine
+async def start_game_engine() -> None:
+    global _game_engine, _game_task
     settings = get_settings()
     if not settings.game_loop_enabled:
         return
-    if _game_engine is None:
-        _game_engine = GameEngine()
-    _game_engine.start()
+    if _game_engine is not None:
+        return
+    _game_engine = GameEngine()
+    _game_engine.running = True
+    _game_task = asyncio.create_task(_game_engine._run_forever())
+    logger.info(
+        "Game engine started (interval=%ss, models=%s)",
+        settings.game_loop_interval_seconds,
+        len(settings.model_names),
+    )
 
 
-def stop_game_engine() -> None:
+async def stop_game_engine() -> None:
+    global _game_engine, _game_task
     if _game_engine is None:
         return
-    _game_engine.stop()
+    _game_engine.running = False
+    if _game_task is not None:
+        _game_task.cancel()
+        try:
+            await _game_task
+        except asyncio.CancelledError:
+            pass
+        _game_task = None
+    _game_engine = None

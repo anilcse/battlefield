@@ -10,9 +10,11 @@ Full-stack foundation for a Polymarket-style prediction trading platform with:
 
 1. Copy env file:
    - `cp .env.example .env`
-2. Start services:
-   - `docker compose up --build`
-3. Open API docs:
+2. Set `DATABASE_URL` for local Postgres (e.g. `postgresql+asyncpg://postgres:postgres@localhost:5432/nof1`).
+3. Start (local, no Docker):
+   - `./start.sh`
+   - Or with Docker: `./start.sh docker`
+4. Open API docs:
    - [http://localhost:8000/docs](http://localhost:8000/docs)
 
 ## What Is Included

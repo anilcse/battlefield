@@ -23,9 +23,9 @@ settings = get_settings()
 async def lifespan(_: FastAPI):
     await create_tables(engine)
     start_auto_claimer()
-    start_game_engine()
+    await start_game_engine()
     yield
-    stop_game_engine()
+    await stop_game_engine()
     stop_auto_claimer()
 
 
