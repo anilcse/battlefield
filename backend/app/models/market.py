@@ -16,6 +16,8 @@ class Market(Base):
     end_date: Mapped[str] = mapped_column(String(30), default="")
     yes_price: Mapped[float] = mapped_column(default=0.5)
     no_price: Mapped[float] = mapped_column(default=0.5)
+    yes_token_id: Mapped[str | None] = mapped_column(String(120), default=None, nullable=True)
+    no_token_id: Mapped[str | None] = mapped_column(String(120), default=None, nullable=True)
 
     forecasts = relationship("Forecast", back_populates="market", cascade="all, delete-orphan")
     trades = relationship("Trade", back_populates="market", cascade="all, delete-orphan")

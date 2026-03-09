@@ -28,12 +28,21 @@ def _safe_float(value: Any, default: float) -> float:
 
 
 class OpenRouterClient:
-    async def forecast_market(self, model_name: str, market_title: str, market_context: str) -> Tuple[dict, float]:
+    async def forecast_market(
+        self,
+        model_name: str,
+        market_title: str,
+        market_context: str,
+        system_prompt: str = "",
+    ) -> Tuple[dict, float]:
         settings = get_settings()
         if not settings.openrouter_api_key:
             raise ValueError("OPENROUTER_API_KEY is missing")
 
-        prompt = (
+        if not system_prompt:
+            system_prompt = "You are a quantitative prediction market trading agent. Return strict JSON."
+
+        prompt = market_context if len(market_context) > 200 else (
             "You are forecasting a prediction market outcome.\n"
             "Return strict JSON only with keys: should_trade, skip_reason, probability_yes, confidence, rationale.\n"
             "should_trade: boolean - true if you want to trade this market, false to skip.\n"
@@ -45,9 +54,9 @@ class OpenRouterClient:
 
         body = {
             "model": model_name,
-            "temperature": 0.2,
+            "temperature": 0.3,
             "messages": [
-                {"role": "system", "content": "You are a quantitative forecasting assistant."},
+                {"role": "system", "content": system_prompt},
                 {"role": "user", "content": prompt},
             ],
             "response_format": {"type": "json_object"},
@@ -60,7 +69,7 @@ class OpenRouterClient:
             "X-Title": settings.openrouter_app_name,
         }
         url = f"{settings.openrouter_base_url.rstrip('/')}/chat/completions"
-        async with httpx.AsyncClient(timeout=30) as client:
+        async with httpx.AsyncClient(timeout=60) as client:
             response = await client.post(url, json=body, headers=headers)
             response.raise_for_status()
             payload = response.json()

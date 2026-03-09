@@ -222,6 +222,41 @@ class AutoClaimer:
                 row.error = error
             await session.commit()
 
+    async def _credit_tournament_balance(self, model_name: str, amount_str: str) -> None:
+        """Credit redeemed USDC back to the active tournament entry for this model."""
+        try:
+            amount = float(amount_str) / 1e6  # USDC has 6 decimals
+            if amount <= 0:
+                return
+        except (ValueError, TypeError):
+            return
+        try:
+            async with SessionLocal() as session:
+                from app.models.tournament import Tournament, TournamentEntry
+                t_result = await session.execute(
+                    select(Tournament).where(Tournament.status == "active").order_by(Tournament.created_at.desc())
+                )
+                tournament = t_result.scalar_one_or_none()
+                if not tournament:
+                    return
+                e_result = await session.execute(
+                    select(TournamentEntry).where(
+                        TournamentEntry.tournament_id == tournament.id,
+                        TournamentEntry.model_name == model_name,
+                    )
+                )
+                entry = e_result.scalar_one_or_none()
+                if entry:
+                    entry.current_balance_usd += amount
+                    entry.realized_pnl_usd += amount
+                    logger.info(
+                        "Auto claim credited $%.2f to tournament balance for model=%s (new bal=$%.2f)",
+                        amount, model_name, entry.current_balance_usd,
+                    )
+                    await session.commit()
+        except Exception as exc:
+            logger.warning("Auto claim: failed to credit tournament balance for %s: %s", model_name, exc)
+
     def _loop(self) -> None:
         models_with_key = [
             name for name in self.settings.model_names
@@ -386,6 +421,7 @@ class AutoClaimer:
                                         amount_redeemed,
                                         tx_hash_hex,
                                     )
+                                    asyncio.run(self._credit_tournament_balance(model_name, amount_redeemed))
                             except Exception as claim_exc:
                                 asyncio.run(
                                     self._record_claim(

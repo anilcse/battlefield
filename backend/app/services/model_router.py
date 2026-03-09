@@ -1,6 +1,7 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import hashlib
+from typing import Any, Dict
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -18,6 +19,7 @@ class ModelOutput:
     cost_usd: float
     should_trade: bool = True
     skip_reason: str = ""
+    raw_response: Dict[str, Any] = field(default_factory=dict)
 
 
 def month_key_now() -> str:
@@ -47,6 +49,7 @@ async def run_model_inference(
     model_name: str,
     market_title: str,
     market_context: str,
+    system_prompt: str = "",
 ) -> ModelOutput:
     await ensure_model_budgets(db)
     month_key = month_key_now()
@@ -67,25 +70,27 @@ async def run_model_inference(
     confidence: float
     rationale: str
     actual_cost: float = estimated_cost
+    raw_response: Dict[str, Any] = {}
     settings = get_settings()
 
-    # Try OpenRouter first. Fall back to deterministic forecast in dev/local mode.
     try:
         if not settings.openrouter_api_key:
             raise ValueError("OPENROUTER_API_KEY not configured")
         client = OpenRouterClient()
-        result, actual_cost = await client.forecast_market(
+        result_data, actual_cost = await client.forecast_market(
             model_name=model_name,
             market_title=market_title,
             market_context=market_context,
+            system_prompt=system_prompt,
         )
-        probability_yes = max(0.0, min(1.0, float(result.get("probability_yes", 0.5))))
-        confidence = max(0.0, min(1.0, float(result.get("confidence", 0.5))))
-        rationale = str(result.get("rationale", "")).strip() or f"{model_name} forecast from OpenRouter."
-        should_trade = result.get("should_trade", True)
+        raw_response = result_data
+        probability_yes = max(0.0, min(1.0, float(result_data.get("probability_yes", 0.5))))
+        confidence = max(0.0, min(1.0, float(result_data.get("confidence", 0.5))))
+        rationale = str(result_data.get("rationale", "")).strip() or f"{model_name} forecast from OpenRouter."
+        should_trade = result_data.get("should_trade", True)
         if isinstance(should_trade, str):
             should_trade = should_trade.lower() in ("true", "1", "yes")
-        skip_reason = str(result.get("skip_reason", "")).strip()
+        skip_reason = str(result_data.get("skip_reason", "")).strip()
     except Exception:
         raw = hashlib.sha256(f"{model_name}|{market_title}|{market_context}".encode("utf-8")).digest()
         probability_yes = 0.05 + (raw[0] / 255.0) * 0.9
@@ -109,4 +114,5 @@ async def run_model_inference(
         cost_usd=round(actual_cost, 6),
         should_trade=bool(should_trade),
         skip_reason=skip_reason,
+        raw_response=raw_response,
     )

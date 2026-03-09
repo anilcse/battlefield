@@ -21,6 +21,36 @@ START_BUDGET_FOR_SEED = 100.0
 TEST_TRADE_USD = 1.0
 
 
+def _normalize_status(s: str) -> str:
+    return (s or "open").strip().lower() or "open"
+
+
+def _token_ids_from_item(item: dict) -> tuple[str | None, str | None]:
+    yes_token_id, no_token_id = None, None
+    tokens = item.get("tokens") or item.get("outcomePrices")
+    if isinstance(tokens, list) and len(tokens) >= 2:
+        for t in tokens:
+            if isinstance(t, dict):
+                outcome = (t.get("outcome") or t.get("side") or "").upper()
+                tid = str(t.get("token_id") or t.get("tokenID") or "").strip()
+                if tid:
+                    if outcome in ("YES", "UP", "0"):
+                        yes_token_id = tid
+                    elif outcome in ("NO", "DOWN", "1"):
+                        no_token_id = tid
+        if not yes_token_id and tokens[0]:
+            yes_token_id = str(tokens[0].get("token_id") or tokens[0].get("tokenID") or "").strip() or None
+        if not no_token_id and len(tokens) > 1 and tokens[1]:
+            no_token_id = str(tokens[1].get("token_id") or tokens[1].get("tokenID") or "").strip() or None
+    clob_ids = item.get("clobTokenIds")
+    if isinstance(clob_ids, list) and len(clob_ids) >= 2:
+        if not yes_token_id:
+            yes_token_id = str(clob_ids[0]).strip() or None
+        if not no_token_id:
+            no_token_id = str(clob_ids[1]).strip() or None
+    return yes_token_id, no_token_id
+
+
 async def _sync_markets_once(session) -> None:
     """Fetch markets from Polymarket and upsert into DB."""
     client = PolymarketClient()
@@ -42,26 +72,34 @@ async def _sync_markets_once(session) -> None:
         description = str(item.get("description") or "")
         end_date_str = str(item.get("end_date_iso") or item.get("endDate") or "")
         category = classify_market(title, description)
+        yes_token_id, no_token_id = _token_ids_from_item(item)
+        status = _normalize_status(str(item.get("status") or "open"))
         if market is None:
             market = Market(
                 polymarket_market_id=external_id,
                 title=title,
                 description=description,
-                status=str(item.get("status") or "open"),
+                status=status,
                 category=category,
                 end_date=end_date_str,
                 yes_price=yes_price,
                 no_price=no_price,
+                yes_token_id=yes_token_id or None,
+                no_token_id=no_token_id or None,
             )
             session.add(market)
         else:
             market.title = title
             market.description = description or market.description
-            market.status = str(item.get("status") or market.status)
+            market.status = status
             market.category = category
             market.end_date = end_date_str or market.end_date
             market.yes_price = yes_price
             market.no_price = no_price
+            if yes_token_id:
+                market.yes_token_id = yes_token_id
+            if no_token_id:
+                market.no_token_id = no_token_id
     await session.commit()
 
 
@@ -84,7 +122,7 @@ async def seed_test_trades_on_first_start() -> None:
         await _sync_markets_once(session)
 
         result = await session.execute(
-            select(Market).where(Market.status == "open").order_by(Market.id.asc()).limit(1)
+            select(Market).where(func.lower(Market.status) == "open").order_by(Market.id.asc()).limit(1)
         )
         market = result.scalar_one_or_none()
         if not market:

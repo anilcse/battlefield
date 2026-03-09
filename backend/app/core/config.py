@@ -67,7 +67,7 @@ class Settings(BaseSettings):
     model_account_configs: Dict[str, Dict[str, str]] = {}
     game_loop_enabled: bool = False
     game_loop_interval_seconds: int = 3600
-    tournament_duration_days: int = 30
+    tournament_duration_days: int = 7
     tournament_start_budget_usd: float = 100.0
     game_trade_size_usd: float = 5.0
     game_edge_threshold: float = 0.10

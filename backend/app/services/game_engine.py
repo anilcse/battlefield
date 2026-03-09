@@ -1,53 +1,194 @@
 """
-Game Engine: runs a competitive 30-day tournament where all configured models
-receive the exact same market data and prompt, forecast simultaneously, and
-auto-trade when they find edge. PnL is tracked per-model.
+Game Engine v3: Autonomous LLM trading competition on Polymarket.
+
+Each agent:
+  - Has a unique persona / strategy style
+  - Sees its own trade history, portfolio, AND competitor standings
+  - Independently selects which markets to trade (from a diverse shuffled pool)
+  - Can trade multiple markets per round (up to 3)
+  - Gets eliminated if underperforming at checkpoints
+  - Ranking uses composite score: 60% profit + 40% volume
 """
 import asyncio
 import logging
+import random
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.config import Settings, get_settings
+from app.core.config import get_settings
 from app.db.session import SessionLocal
 from app.models.forecast import Forecast
 from app.models.market import Market
 from app.models.trade import Trade
 from app.models.tournament import Tournament, TournamentEntry
-from app.services.category_classifier import market_duration_tag
-from app.services.model_router import ModelOutput, run_model_inference
+from app.services.category_classifier import classify_market, market_duration_tag
+from app.services.model_router import run_model_inference
 from app.services.polymarket_client import PolymarketClient
 
 logger = logging.getLogger(__name__)
 
-COMPETITION_PROMPT_TEMPLATE = (
-    "You are competing in a prediction market forecasting tournament.\n"
-    "Your goal is to maximize your portfolio over 30 days starting with ${start_budget}.\n"
-    "Your current balance is ${current_balance}. Every decision matters.\n\n"
-    "MARKET DETAILS:\n"
-    "  Title: {title}\n"
-    "  Description: {description}\n"
-    "  Category: {category}\n"
-    "  Duration type: {duration_tag}\n"
-    "  End date: {end_date}\n"
-    "  Current YES price: {yes_price}\n"
-    "  Current NO price: {no_price}\n"
-    "  Market status: {status}\n\n"
-    "DECISION REQUIRED:\n"
-    "1. First decide if you should trade this market category at all.\n"
-    "   Consider: Is this category in your area of expertise? "
-    "Do you have an information edge? Is the risk/reward worth it given your remaining balance?\n"
-    "2. If yes, provide your probability estimate.\n\n"
-    "Return strict JSON only with these keys:\n"
-    "  should_trade: boolean (true if you want to trade this market, false to skip)\n"
-    "  skip_reason: string (if should_trade is false, explain why you are skipping)\n"
-    "  probability_yes: decimal 0-1 (your probability the market resolves YES)\n"
-    "  confidence: decimal 0-1 (how confident you are in your estimate)\n"
-    "  rationale: string (your reasoning)\n"
-)
+AGENT_PERSONAS = {
+    "openai/gpt-5": {
+        "style": "Quantitative Analyst",
+        "system": (
+            "You are a quantitative analyst competing in a prediction market tournament. "
+            "You excel at statistical reasoning and finding mispriced markets. "
+            "You prefer markets where public sentiment diverges from base rates. "
+            "You trade frequently and diversely. Return strict JSON only."
+        ),
+    },
+    "anthropic/claude-sonnet-4": {
+        "style": "Contrarian Strategist",
+        "system": (
+            "You are a contrarian strategist competing in a prediction market tournament. "
+            "You look for markets where the crowd is likely wrong. "
+            "You thrive on politics, social media events, and celebrity predictions. "
+            "Be bold and trade actively. Return strict JSON only."
+        ),
+    },
+    "x-ai/grok-4": {
+        "style": "News & Social Alpha Trader",
+        "system": (
+            "You are a news-driven trader competing in a prediction market tournament. "
+            "You specialise in Elon Musk tweets, tech events, breaking news, and crypto. "
+            "You move fast and trade often across multiple markets. Return strict JSON only."
+        ),
+    },
+    "google/gemini-3.1-pro-preview": {
+        "style": "Diversified Portfolio Manager",
+        "system": (
+            "You are a diversified portfolio manager competing in a prediction market tournament. "
+            "You spread risk across many markets and categories — politics, weather, crypto, sports. "
+            "You never put more than 15% of balance in a single market. Return strict JSON only."
+        ),
+    },
+    "deepseek/deepseek-v3.2-speciale": {
+        "style": "High-Frequency Value Seeker",
+        "system": (
+            "You are a high-frequency value seeker competing in a prediction market tournament. "
+            "You hunt for even small edges and trade them aggressively. "
+            "You prefer short-term and crypto markets but will trade anything with an edge. "
+            "Maximise trade count and volume. Return strict JSON only."
+        ),
+    },
+}
+
+DEFAULT_PERSONA = {
+    "style": "Adaptive Trader",
+    "system": (
+        "You are an adaptive prediction market trader competing in a tournament. "
+        "Analyse each market, develop your own strategy, and trade frequently "
+        "across diverse categories. Return strict JSON only."
+    ),
+}
+
+MIN_AGENTS_BEFORE_ELIMINATION = 3
+ELIMINATION_BALANCE_THRESHOLD_PCT = 0.4
+MAX_TRADES_PER_ROUND = 3
+
+
+def _get_persona(model_name: str) -> dict:
+    return AGENT_PERSONAS.get(model_name, DEFAULT_PERSONA)
+
+
+def _build_agent_prompt(
+    *,
+    model_name: str,
+    persona: dict,
+    start_budget: float,
+    current_balance: float,
+    total_trades: int,
+    total_volume: float,
+    recent_trades: list[dict],
+    held_market_ids: set[int],
+    available_markets: list[dict],
+    tournament_days_remaining: int,
+    competitor_summary: str,
+) -> str:
+    trade_history_str = "None yet — you should start trading!" if not recent_trades else "\n".join(
+        f"  - {t['side']} on \"{t['title']}\" @ ${t['price']:.2f}, qty {t['qty']:.2f} ({t['category']})"
+        for t in recent_trades[-15:]
+    )
+
+    markets_str = "\n".join(
+        f"  [{i+1}] \"{m['title']}\" | Category: {m['category']} | Duration: {m['duration_tag']} "
+        f"| YES: ${m['yes_price']:.2f} | NO: ${m['no_price']:.2f} | End: {m['end_date'] or 'unknown'}"
+        + (" [ALREADY HELD]" if m["id"] in held_market_ids else "")
+        for i, m in enumerate(available_markets)
+    )
+
+    return (
+        f"You are agent \"{model_name}\" — a {persona['style']}.\n\n"
+        f"=== TOURNAMENT STATUS ===\n"
+        f"  Starting budget: ${start_budget:.0f}\n"
+        f"  Your current balance: ${current_balance:.2f}\n"
+        f"  Your total trades: {total_trades}\n"
+        f"  Your total volume: ${total_volume:.2f}\n"
+        f"  Days remaining: {tournament_days_remaining}\n"
+        f"  Scoring: Profit (60%) + Volume (40%). Low performers get ELIMINATED!\n\n"
+        f"=== COMPETITOR STANDINGS ===\n{competitor_summary}\n\n"
+        f"=== YOUR RECENT TRADES ===\n{trade_history_str}\n\n"
+        f"=== AVAILABLE MARKETS ({len(available_markets)}) ===\n{markets_str}\n\n"
+        f"=== YOUR TASK ===\n"
+        f"Pick UP TO {MAX_TRADES_PER_ROUND} markets to trade. You MUST trade at least 1 unless "
+        f"you have very good reason not to. Volume matters for your score!\n"
+        f"For markets marked [ALREADY HELD], only trade if you want to add to your position.\n"
+        f"Consider your persona, competitors' positions, your balance, and time remaining.\n\n"
+        f"Return strict JSON with key \"trades\" containing an array of trade objects.\n"
+        f"Each trade object must have:\n"
+        f"  market_index: integer (1-based index from list above)\n"
+        f"  side: \"YES\" or \"NO\"\n"
+        f"  size_usd: decimal (how much USD to risk on this trade, min 1.0, max {min(15, current_balance):.2f})\n"
+        f"  confidence: decimal 0-1\n"
+        f"  rationale: string (brief reasoning)\n\n"
+        f"If you truly want to skip ALL markets, return: {{\"trades\": [], \"skip_reason\": \"...\"}}\n"
+        f"Example: {{\"trades\": [{{\"market_index\": 3, \"side\": \"YES\", \"size_usd\": 5.0, "
+        f"\"confidence\": 0.7, \"rationale\": \"Underpriced\"}}]}}\n"
+    )
+
+
+def _parse_trades_from_response(raw: dict, num_markets: int, max_balance: float) -> list[dict]:
+    """Extract validated trade decisions from LLM JSON response."""
+    trades_raw = raw.get("trades", [])
+    if not isinstance(trades_raw, list):
+        if raw.get("market_index") is not None:
+            trades_raw = [raw]
+        else:
+            return []
+
+    validated = []
+    total_allocated = 0.0
+    for t in trades_raw:
+        if not isinstance(t, dict):
+            continue
+        try:
+            idx = int(t.get("market_index", 0)) - 1
+            if idx < 0 or idx >= num_markets:
+                continue
+            side = str(t.get("side", "YES")).upper()
+            if side not in ("YES", "NO"):
+                side = "YES"
+            size = max(1.0, min(float(t.get("size_usd", 3.0)), max_balance - total_allocated))
+            if size < 0.5:
+                continue
+            confidence = max(0.0, min(1.0, float(t.get("confidence", 0.5))))
+            rationale = str(t.get("rationale", ""))[:200]
+            validated.append({
+                "market_index": idx,
+                "side": side,
+                "size_usd": round(size, 2),
+                "confidence": confidence,
+                "rationale": rationale,
+            })
+            total_allocated += size
+            if len(validated) >= MAX_TRADES_PER_ROUND:
+                break
+        except (TypeError, ValueError):
+            continue
+    return validated
 
 
 class GameEngine:
@@ -67,7 +208,7 @@ class GameEngine:
                 tournament.status = "completed"
                 await self._rank_entries(session, tournament.id)
                 await session.commit()
-                logger.info("Tournament %s completed", tournament.id)
+                logger.info("Tournament %s completed — final rankings set", tournament.id)
                 tournament = None
 
         if tournament is None:
@@ -93,18 +234,37 @@ class GameEngine:
                 session.add(entry)
             await session.commit()
             await session.refresh(tournament)
-            logger.info("New tournament started: id=%s ends=%s", tournament.id, tournament.ends_at)
+            logger.info("New tournament started: id=%s ends=%s models=%d",
+                        tournament.id, tournament.ends_at, len(self.settings.model_names))
 
         return tournament
 
     async def _rank_entries(self, session: AsyncSession, tournament_id: int) -> None:
+        """Rank active (non-eliminated) entries by composite score: 60% profit + 40% volume."""
         result = await session.execute(
-            select(TournamentEntry)
-            .where(TournamentEntry.tournament_id == tournament_id)
-            .order_by(TournamentEntry.current_balance_usd.desc())
+            select(TournamentEntry).where(TournamentEntry.tournament_id == tournament_id)
         )
-        entries = list(result.scalars().all())
-        for rank, entry in enumerate(entries, start=1):
+        all_entries = list(result.scalars().all())
+
+        active = [e for e in all_entries if e.rank != -1]
+        eliminated = [e for e in all_entries if e.rank == -1]
+
+        if not active:
+            return
+
+        max_balance = max(e.current_balance_usd for e in active)
+        max_volume = max((e.total_volume_usd for e in active), default=1.0) or 1.0
+        start_b = active[0].starting_balance_usd or 100.0
+
+        scored = []
+        for e in active:
+            profit_score = (e.current_balance_usd - start_b) / start_b
+            volume_score = e.total_volume_usd / max_volume
+            composite = 0.6 * profit_score + 0.4 * volume_score
+            scored.append((composite, e))
+
+        scored.sort(key=lambda x: x[0], reverse=True)
+        for rank, (score, entry) in enumerate(scored, start=1):
             entry.rank = rank
 
     async def _get_entry(self, session: AsyncSession, tournament_id: int, model_name: str) -> Optional[TournamentEntry]:
@@ -116,149 +276,367 @@ class GameEngine:
         )
         return result.scalar_one_or_none()
 
+    async def _get_all_entries(self, session: AsyncSession, tournament_id: int) -> list[TournamentEntry]:
+        result = await session.execute(
+            select(TournamentEntry)
+            .where(TournamentEntry.tournament_id == tournament_id)
+            .order_by(TournamentEntry.current_balance_usd.desc())
+        )
+        return list(result.scalars().all())
+
+    async def _get_recent_trades(self, session: AsyncSession, model_name: str, limit: int = 15) -> list[dict]:
+        result = await session.execute(
+            select(Trade, Market)
+            .join(Market, Trade.market_id == Market.id)
+            .where(Trade.model_name == model_name)
+            .order_by(Trade.created_at.desc())
+            .limit(limit)
+        )
+        rows = result.all()
+        return [
+            {
+                "side": t.side,
+                "title": m.title[:60],
+                "price": float(t.price),
+                "qty": float(t.quantity),
+                "category": m.category,
+                "market_id": m.id,
+            }
+            for t, m in rows
+        ]
+
+    async def _get_held_market_ids(self, session: AsyncSession, model_name: str) -> set[int]:
+        result = await session.execute(
+            select(Trade.market_id).where(Trade.model_name == model_name).distinct()
+        )
+        return {row[0] for row in result.all()}
+
+    async def _get_model_volume(self, session: AsyncSession, model_name: str, since: datetime) -> float:
+        result = await session.execute(
+            select(func.coalesce(func.sum(Trade.quantity * Trade.price), 0.0))
+            .where(Trade.model_name == model_name, Trade.created_at >= since)
+        )
+        return float(result.scalar() or 0.0)
+
+    def _build_competitor_summary(self, entries: list[TournamentEntry], current_model: str) -> str:
+        lines = []
+        for e in entries:
+            if e.rank == -1:
+                status = "ELIMINATED"
+            elif e.model_name == current_model:
+                status = "← YOU"
+            else:
+                status = f"Rank #{e.rank or '?'}"
+            profit_pct = ((e.current_balance_usd - e.starting_balance_usd) / e.starting_balance_usd * 100
+                          if e.starting_balance_usd > 0 else 0.0)
+            lines.append(
+                f"  {e.model_name}: ${e.current_balance_usd:.2f} "
+                f"({profit_pct:+.1f}%) | {e.total_trades} trades | "
+                f"${e.total_volume_usd:.2f} vol | {status}"
+            )
+        return "\n".join(lines) if lines else "  No competitors yet."
+
+    async def _sync_markets(self, session: AsyncSession) -> None:
+        from app.services.startup_seed import _normalize_status, _token_ids_from_item
+        try:
+            payload = await self.polymarket_client.fetch_markets(limit=100)
+            raw_items = payload.get("data", payload if isinstance(payload, list) else [])
+            count = 0
+            for item in raw_items:
+                external_id = str(item.get("id") or item.get("market_id") or "")
+                title = str(item.get("question") or item.get("title") or "").strip()
+                if not external_id or not title:
+                    continue
+                existing = await session.execute(select(Market).where(Market.polymarket_market_id == external_id))
+                market = existing.scalar_one_or_none()
+                yes_price = float(item.get("yesPrice") or item.get("yes_price") or 0.5)
+                no_price = float(item.get("noPrice") or item.get("no_price") or (1.0 - yes_price))
+                description = str(item.get("description") or "")
+                end_date_str = str(item.get("end_date_iso") or item.get("endDate") or "")
+                category = classify_market(title, description)
+                yes_token_id, no_token_id = _token_ids_from_item(item)
+                status = _normalize_status(str(item.get("status") or "open"))
+                if market is None:
+                    market = Market(
+                        polymarket_market_id=external_id,
+                        title=title, description=description, status=status,
+                        category=category, end_date=end_date_str,
+                        yes_price=yes_price, no_price=no_price,
+                        yes_token_id=yes_token_id, no_token_id=no_token_id,
+                    )
+                    session.add(market)
+                    count += 1
+                else:
+                    market.yes_price = yes_price
+                    market.no_price = no_price
+                    market.status = status
+                    market.category = category or market.category
+                    market.description = description or market.description
+                    if yes_token_id:
+                        market.yes_token_id = yes_token_id
+                    if no_token_id:
+                        market.no_token_id = no_token_id
+            await session.commit()
+            logger.info("Market sync: %d new, %d total items from API", count, len(raw_items))
+        except Exception as exc:
+            logger.warning("Market sync failed: %s", exc)
+
+    async def _resolve_paper_pnl(self, session: AsyncSession, tournament: Tournament) -> None:
+        """
+        For paper mode: check if any markets resolved and credit/debit the
+        tournament balance for trades on those markets.
+        A market is 'resolved' if status changed to 'closed'/'resolved' and
+        the YES price moved to ~1.0 or ~0.0 (indicating the outcome).
+        """
+        result = await session.execute(
+            select(Market).where(
+                func.lower(Market.status).in_(["closed", "resolved", "finalized"])
+            )
+        )
+        resolved_markets = list(result.scalars().all())
+        if not resolved_markets:
+            return
+
+        for market in resolved_markets:
+            yes_won = float(market.yes_price) >= 0.95
+            no_won = float(market.no_price) >= 0.95
+            if not yes_won and not no_won:
+                continue
+
+            result = await session.execute(
+                select(Trade).where(
+                    Trade.market_id == market.id,
+                    Trade.status.in_(["submitted", "simulated"]),
+                )
+            )
+            trades = list(result.scalars().all())
+            for trade in trades:
+                entry = await self._get_entry(session, tournament.id, trade.model_name)
+                if not entry or entry.rank == -1:
+                    continue
+
+                won = (trade.side == "YES" and yes_won) or (trade.side == "NO" and no_won)
+                if won:
+                    payout = float(trade.quantity)
+                    entry.current_balance_usd += payout
+                    entry.realized_pnl_usd += payout - (float(trade.quantity) * float(trade.price))
+                    logger.info("PnL resolved: model=%s market=%s WON +$%.2f", trade.model_name, market.title[:40], payout)
+                trade.status = "resolved"
+
+            await session.commit()
+
+    async def _eliminate_underperformers(self, session: AsyncSession, tournament: Tournament) -> None:
+        result = await session.execute(
+            select(TournamentEntry)
+            .where(
+                TournamentEntry.tournament_id == tournament.id,
+                TournamentEntry.rank != -1,
+            )
+            .order_by(TournamentEntry.current_balance_usd.desc())
+        )
+        active_entries = list(result.scalars().all())
+        if len(active_entries) <= MIN_AGENTS_BEFORE_ELIMINATION:
+            return
+
+        worst = active_entries[-1]
+        loss_pct = (worst.starting_balance_usd - worst.current_balance_usd) / worst.starting_balance_usd
+        if loss_pct >= ELIMINATION_BALANCE_THRESHOLD_PCT:
+            worst.rank = -1
+            logger.info(
+                "ELIMINATED: model=%s balance=$%.2f (lost %.0f%% of $%.0f)",
+                worst.model_name, worst.current_balance_usd,
+                loss_pct * 100, worst.starting_balance_usd,
+            )
+
+    async def _run_agent_round(
+        self,
+        session: AsyncSession,
+        tournament: Tournament,
+        model_name: str,
+        market_pool: list[dict],
+        all_entries: list[TournamentEntry],
+    ) -> None:
+        entry = await self._get_entry(session, tournament.id, model_name)
+        if entry is None or entry.current_balance_usd <= 1.0 or entry.rank == -1:
+            return
+
+        persona = _get_persona(model_name)
+        recent_trades = await self._get_recent_trades(session, model_name)
+        held_ids = await self._get_held_market_ids(session, model_name)
+        total_volume = await self._get_model_volume(session, model_name, tournament.started_at)
+        competitor_summary = self._build_competitor_summary(all_entries, model_name)
+        days_remaining = max(0, (tournament.ends_at - datetime.now(tz=timezone.utc)).days)
+
+        agent_markets = list(market_pool)
+        random.shuffle(agent_markets)
+        agent_markets = agent_markets[:25]
+
+        prompt = _build_agent_prompt(
+            model_name=model_name,
+            persona=persona,
+            start_budget=self.settings.tournament_start_budget_usd,
+            current_balance=entry.current_balance_usd,
+            total_trades=entry.total_trades,
+            total_volume=total_volume,
+            recent_trades=recent_trades,
+            held_market_ids=held_ids,
+            available_markets=agent_markets,
+            tournament_days_remaining=days_remaining,
+            competitor_summary=competitor_summary,
+        )
+
+        try:
+            output = await run_model_inference(
+                db=session,
+                model_name=model_name,
+                market_title="Tournament Round",
+                market_context=prompt,
+                system_prompt=persona["system"],
+            )
+
+            entry.total_forecasts += 1
+            entry.current_balance_usd -= output.cost_usd
+
+            trade_decisions = _parse_trades_from_response(
+                output.raw_response, len(agent_markets), entry.current_balance_usd
+            )
+
+            if not trade_decisions:
+                skip = output.raw_response.get("skip_reason") or output.skip_reason or "no trades selected"
+                logger.info("Agent %s (%s) skipped: %s", model_name, persona["style"], skip)
+                forecast_mid = agent_markets[0]["id"] if agent_markets else 0
+                session.add(Forecast(
+                    market_id=forecast_mid, model_name=model_name,
+                    probability_yes=output.probability_yes,
+                    confidence=output.confidence, rationale=output.rationale,
+                    cost_usd=output.cost_usd,
+                ))
+                await session.commit()
+                return
+
+            for td in trade_decisions:
+                chosen = agent_markets[td["market_index"]]
+                side = td["side"]
+                trade_size = min(td["size_usd"], entry.current_balance_usd)
+                if trade_size < 0.5:
+                    break
+
+                price = chosen["yes_price"] if side == "YES" else chosen["no_price"]
+                if price <= 0.01 or price >= 0.99:
+                    continue
+
+                quantity = trade_size / price
+                token_id = chosen["yes_token_id"] if side == "YES" else chosen["no_token_id"]
+
+                session.add(Forecast(
+                    market_id=chosen["id"], model_name=model_name,
+                    probability_yes=output.probability_yes,
+                    confidence=td["confidence"],
+                    rationale=td["rationale"][:500],
+                    cost_usd=0.0,
+                ))
+
+                try:
+                    remote = await self.polymarket_client.place_order(
+                        model_name=model_name,
+                        market_id=chosen["polymarket_market_id"],
+                        side=side, quantity=quantity, price=price,
+                        token_id=token_id,
+                    )
+
+                    trade = Trade(
+                        market_id=chosen["id"],
+                        model_name=model_name,
+                        side=side, quantity=quantity, price=price,
+                        status=remote.get("status", "submitted"),
+                        source=remote.get("source", "game"),
+                        external_order_id=remote.get("external_order_id", ""),
+                    )
+                    session.add(trade)
+                    entry.total_trades += 1
+                    entry.total_volume_usd += trade_size
+                    entry.current_balance_usd -= trade_size
+
+                    logger.info(
+                        "TRADE: agent=%s [%s] market=\"%s\" cat=%s side=%s $%.2f @ %.2f qty=%.2f | bal=$%.2f",
+                        model_name, persona["style"], chosen["title"][:40],
+                        chosen["category"], side, trade_size, price, quantity,
+                        entry.current_balance_usd,
+                    )
+                except Exception as exc:
+                    logger.warning("Trade failed: agent=%s market=%s: %s", model_name, chosen["title"][:40], exc)
+
+            await session.commit()
+
+        except Exception as exc:
+            logger.warning("Agent %s round error: %s", model_name, exc)
+
     async def _run_round(self) -> None:
         async with SessionLocal() as session:
             tournament = await self._ensure_active_tournament(session)
 
-            result = await session.execute(select(Market).where(Market.status == "open"))
-            markets = list(result.scalars().all())
+            await self._sync_markets(session)
+            await self._resolve_paper_pnl(session, tournament)
 
-            if not markets:
-                logger.info("Game engine: no open markets to forecast")
+            result = await session.execute(
+                select(Market).where(func.lower(Market.status) == "open")
+            )
+            all_markets = list(result.scalars().all())
+            if not all_markets:
+                logger.info("Game engine: no open markets after sync")
                 return
 
-            logger.info("Game engine: scanning %d open market(s) for forecasts and trades", len(markets))
-            for market in markets:
-                duration_tag = market_duration_tag(market.title, market.description, market.end_date)
+            market_pool = [
+                {
+                    "id": m.id,
+                    "polymarket_market_id": m.polymarket_market_id,
+                    "title": m.title,
+                    "description": m.description,
+                    "category": m.category,
+                    "duration_tag": market_duration_tag(m.title, m.description, m.end_date),
+                    "end_date": m.end_date,
+                    "yes_price": float(m.yes_price),
+                    "no_price": float(m.no_price),
+                    "yes_token_id": m.yes_token_id,
+                    "no_token_id": m.no_token_id,
+                }
+                for m in all_markets
+                if 0.02 < float(m.yes_price) < 0.98
+            ]
 
-                tradeable_forecasts: dict[str, ModelOutput] = {}
-                for model_name in self.settings.model_names:
-                    entry = await self._get_entry(session, tournament.id, model_name)
-                    if entry is None or entry.current_balance_usd <= 0:
-                        continue
+            if not market_pool:
+                logger.info("Game engine: no markets with tradeable prices (all at extremes)")
+                return
 
-                    context = COMPETITION_PROMPT_TEMPLATE.format(
-                        start_budget=self.settings.tournament_start_budget_usd,
-                        current_balance=round(entry.current_balance_usd, 2),
-                        title=market.title,
-                        description=market.description,
-                        category=market.category,
-                        duration_tag=duration_tag,
-                        end_date=market.end_date or "unknown",
-                        yes_price=market.yes_price,
-                        no_price=market.no_price,
-                        status=market.status,
-                    )
+            all_entries = await self._get_all_entries(session, tournament.id)
 
-                    try:
-                        output = await run_model_inference(
-                            db=session,
-                            model_name=model_name,
-                            market_title=market.title,
-                            market_context=context,
-                        )
+            active_models = [
+                e.model_name for e in all_entries
+                if e.rank != -1 and e.current_balance_usd > 1.0
+            ]
 
-                        forecast_row = Forecast(
-                            market_id=market.id,
-                            model_name=model_name,
-                            probability_yes=output.probability_yes,
-                            confidence=output.confidence,
-                            rationale=output.rationale,
-                            cost_usd=output.cost_usd,
-                        )
-                        session.add(forecast_row)
-                        entry.total_forecasts += 1
-                        entry.current_balance_usd -= output.cost_usd
+            logger.info(
+                "=== Round: %d markets, %d active agents (of %d total) ===",
+                len(market_pool), len(active_models), len(all_entries),
+            )
 
-                        should_trade = output.should_trade
-                        if not should_trade:
-                            logger.info(
-                                "Game skip: model=%s market=%s category=%s reason=%s",
-                                model_name, market.id, market.category,
-                                output.skip_reason or "model declined",
-                            )
-                            continue
+            for model_name in active_models:
+                await self._run_agent_round(session, tournament, model_name, market_pool, all_entries)
 
-                        tradeable_forecasts[model_name] = output
-
-                    except Exception as exc:
-                        logger.warning("Game engine: model %s forecast failed on market %s: %s", model_name, market.id, exc)
-
-                await session.commit()
-
-                for model_name, output in tradeable_forecasts.items():
-                    entry = await self._get_entry(session, tournament.id, model_name)
-                    if entry is None or entry.current_balance_usd <= self.settings.game_trade_size_usd * 0.5:
-                        continue
-
-                    edge_yes = output.probability_yes - float(market.yes_price)
-                    edge_no = (1.0 - output.probability_yes) - float(market.no_price)
-
-                    side: Optional[str] = None
-                    price: float = 0.0
-                    if edge_yes >= self.settings.game_edge_threshold and output.confidence >= 0.5:
-                        side = "YES"
-                        price = float(market.yes_price)
-                    elif edge_no >= self.settings.game_edge_threshold and output.confidence >= 0.5:
-                        side = "NO"
-                        price = float(market.no_price)
-
-                    if side is None or price <= 0:
-                        continue
-
-                    trade_notional = min(self.settings.game_trade_size_usd, entry.current_balance_usd)
-                    quantity = trade_notional / price
-
-                    try:
-                        remote = await self.polymarket_client.place_order(
-                            model_name=model_name,
-                            market_id=market.polymarket_market_id,
-                            side=side,
-                            quantity=quantity,
-                            price=price,
-                        )
-                        trade = Trade(
-                            market_id=market.id,
-                            model_name=model_name,
-                            side=side,
-                            quantity=quantity,
-                            price=price,
-                            status=remote.get("status", "submitted"),
-                            source=remote.get("source", "game"),
-                            external_order_id=remote.get("external_order_id", ""),
-                        )
-                        session.add(trade)
-
-                        entry.total_trades += 1
-                        entry.current_balance_usd -= trade_notional
-                        entry.unrealized_pnl_usd += quantity * (
-                            (float(market.yes_price) - price) if side == "YES" else (float(market.no_price) - price)
-                        )
-
-                        logger.info(
-                            "Game trade: model=%s market=%s cat=%s side=%s qty=%.4f price=%.4f edge=%.4f",
-                            model_name, market.id, market.category, side, quantity, price,
-                            edge_yes if side == "YES" else edge_no,
-                        )
-                    except Exception as exc:
-                        logger.warning("Game engine: trade failed model=%s market=%s: %s", model_name, market.id, exc)
-
-                await session.commit()
-
+            await self._eliminate_underperformers(session, tournament)
             await self._rank_entries(session, tournament.id)
             await session.commit()
 
     async def _run_forever(self) -> None:
         while self.running:
             try:
-                logger.info("Game engine: starting round (scanning markets, running models, executing trades)")
                 await self._run_round()
             except asyncio.CancelledError:
                 break
             except Exception as exc:
                 logger.error("Game engine loop error: %s", exc)
             if self.running:
-                logger.info("Game engine: round complete; next round in %s seconds", self.settings.game_loop_interval_seconds)
+                logger.info("Next round in %ss", self.settings.game_loop_interval_seconds)
                 await asyncio.sleep(self.settings.game_loop_interval_seconds)
 
 
@@ -277,9 +655,10 @@ async def start_game_engine() -> None:
     _game_engine.running = True
     _game_task = asyncio.create_task(_game_engine._run_forever())
     logger.info(
-        "Game engine started (interval=%ss, models=%s)",
+        "Game engine started (interval=%ss, models=%d, duration=%dd)",
         settings.game_loop_interval_seconds,
         len(settings.model_names),
+        settings.tournament_duration_days,
     )
 
 

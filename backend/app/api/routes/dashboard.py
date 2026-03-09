@@ -89,7 +89,7 @@ async def dashboard() -> str:
       <div id="tournament-info" style="margin-bottom: 8px; font-size: 13px; color: var(--muted);"></div>
       <div class="progress-bar" style="margin-bottom: 12px;"><div id="tournament-progress" class="progress-fill" style="width:0%"></div></div>
       <table class="table" id="leaderboard-table">
-        <thead><tr><th>#</th><th>Model</th><th>Balance</th><th>Return %</th><th>Trades</th><th>Forecasts</th><th>Unreal. PnL</th></tr></thead>
+        <thead><tr><th>#</th><th>Model</th><th>Balance</th><th>Return %</th><th>Score</th><th>Volume</th><th>Trades</th><th>Status</th></tr></thead>
         <tbody></tbody>
       </table>
     </div>
@@ -209,15 +209,18 @@ async def dashboard() -> str:
           else if (idx === 2) badge = '<span class="badge badge-bronze">3rd</span>';
           else badge = `${idx + 1}`;
           const retClass = row.total_return_pct >= 0 ? "green" : "red";
-          const pnlClass = row.unrealized_pnl_usd >= 0 ? "green" : "red";
+          const scoreClass = (row.composite_score || 0) >= 0 ? "green" : "red";
+          const statusLabel = row.eliminated ? '<span class="badge" style="background:#2a1a10;color:#ff6b6b">ELIMINATED</span>' : '<span class="badge" style="background:#1a2a10;color:#3ddc97">ACTIVE</span>';
+          if (row.eliminated) badge = '<span style="color:#ff6b6b">EL</span>';
           tr.innerHTML = `
             <td>${badge}</td>
             <td><span class="pill">${row.model_name}</span></td>
             <td>${formatUsd(row.current_balance_usd)}</td>
             <td class="${retClass}">${row.total_return_pct >= 0 ? "+" : ""}${row.total_return_pct}%</td>
+            <td class="${scoreClass}">${(row.composite_score || 0).toFixed(3)}</td>
+            <td>${formatUsd(row.total_volume_usd || 0)}</td>
             <td>${row.total_trades}</td>
-            <td>${row.total_forecasts}</td>
-            <td class="${pnlClass}">${formatUsd(row.unrealized_pnl_usd)}</td>
+            <td>${statusLabel}</td>
           `;
           tbody.appendChild(tr);
         });

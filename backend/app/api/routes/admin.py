@@ -219,9 +219,21 @@ async def leaderboard(db: AsyncSession = Depends(get_db)) -> dict:
     e_result = await db.execute(
         select(TournamentEntry)
         .where(TournamentEntry.tournament_id == tournament.id)
-        .order_by(TournamentEntry.current_balance_usd.desc())
     )
-    entries = list(e_result.scalars().all())
+    all_entries = list(e_result.scalars().all())
+
+    active = [e for e in all_entries if e.rank != -1]
+    eliminated = [e for e in all_entries if e.rank == -1]
+    start_b = tournament.start_budget_usd or 100.0
+    max_vol = max((e.total_volume_usd for e in active), default=1.0) or 1.0
+
+    def _composite(e: TournamentEntry) -> float:
+        profit_score = (e.current_balance_usd - start_b) / start_b
+        volume_score = e.total_volume_usd / max_vol
+        return 0.6 * profit_score + 0.4 * volume_score
+
+    active.sort(key=_composite, reverse=True)
+    sorted_entries = active + eliminated
 
     now = datetime.now(tz=timezone.utc)
     elapsed = (now - tournament.started_at).total_seconds()
@@ -241,7 +253,7 @@ async def leaderboard(db: AsyncSession = Depends(get_db)) -> dict:
         },
         "entries": [
             {
-                "rank": idx + 1,
+                "rank": "EL" if entry.rank == -1 else idx + 1,
                 "model_name": entry.model_name,
                 "starting_balance_usd": entry.starting_balance_usd,
                 "current_balance_usd": round(entry.current_balance_usd, 4),
@@ -251,12 +263,15 @@ async def leaderboard(db: AsyncSession = Depends(get_db)) -> dict:
                 )
                 if entry.starting_balance_usd > 0
                 else 0.0,
+                "composite_score": round(_composite(entry), 4),
                 "total_trades": entry.total_trades,
                 "total_forecasts": entry.total_forecasts,
+                "total_volume_usd": round(getattr(entry, "total_volume_usd", 0.0), 4),
                 "realized_pnl_usd": round(entry.realized_pnl_usd, 4),
                 "unrealized_pnl_usd": round(entry.unrealized_pnl_usd, 4),
+                "eliminated": entry.rank == -1,
             }
-            for idx, entry in enumerate(entries)
+            for idx, entry in enumerate(sorted_entries)
         ],
     }
 

@@ -17,12 +17,14 @@ class TradingEngine:
         if market is None:
             raise ValueError("Market not found")
 
+        token_id = (market.yes_token_id if (order.side or "").upper() == "YES" else market.no_token_id) or None
         remote = await self.client.place_order(
             model_name=order.model_name,
             market_id=market.polymarket_market_id,
             side=order.side,
             quantity=order.quantity,
             price=order.price,
+            token_id=token_id,
         )
 
         trade = Trade(

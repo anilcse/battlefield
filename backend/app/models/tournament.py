@@ -30,5 +30,6 @@ class TournamentEntry(Base):
     total_trades: Mapped[int] = mapped_column(default=0)
     total_forecasts: Mapped[int] = mapped_column(default=0)
     realized_pnl_usd: Mapped[float] = mapped_column(default=0.0)
+    total_volume_usd: Mapped[float] = mapped_column(default=0.0)
     unrealized_pnl_usd: Mapped[float] = mapped_column(default=0.0)
     rank: Mapped[Optional[int]] = mapped_column(default=None)
