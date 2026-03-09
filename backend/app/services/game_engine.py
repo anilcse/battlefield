@@ -127,6 +127,7 @@ class GameEngine:
                 logger.info("Game engine: no open markets to forecast")
                 return
 
+            logger.info("Game engine: scanning %d open market(s) for forecasts and trades", len(markets))
             for market in markets:
                 duration_tag = market_duration_tag(market.title, market.description, market.end_date)
 
@@ -250,12 +251,14 @@ class GameEngine:
     async def _run_forever(self) -> None:
         while self.running:
             try:
+                logger.info("Game engine: starting round (scanning markets, running models, executing trades)")
                 await self._run_round()
             except asyncio.CancelledError:
                 break
             except Exception as exc:
                 logger.error("Game engine loop error: %s", exc)
             if self.running:
+                logger.info("Game engine: round complete; next round in %s seconds", self.settings.game_loop_interval_seconds)
                 await asyncio.sleep(self.settings.game_loop_interval_seconds)
 
 

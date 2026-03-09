@@ -1,9 +1,11 @@
+import logging
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import get_settings
 from app.db.session import get_db
 from app.models.auto_claim import AutoClaim
 from app.models.forecast import Forecast
@@ -11,8 +13,11 @@ from app.models.market import Market
 from app.models.model_budget import ModelBudget
 from app.models.tournament import Tournament, TournamentEntry
 from app.models.trade import Trade
+from app.schemas.trade import TradeCreate, TradeRead
 from app.services.model_router import ensure_model_budgets
+from app.services.trading_engine import TradingEngine
 
+logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/admin", tags=["admin"])
 
 
@@ -254,3 +259,59 @@ async def leaderboard(db: AsyncSession = Depends(get_db)) -> dict:
             for idx, entry in enumerate(entries)
         ],
     }
+
+
+@router.post("/test-trade", response_model=TradeRead)
+async def test_trade(
+    db: AsyncSession = Depends(get_db),
+    market_id: int | None = Query(None, description="Market ID (internal). If omitted, first open market is used."),
+    model_name: str | None = Query(None, description="Model name. If omitted, first configured model is used."),
+    side: str = Query("YES", description="YES or NO"),
+    quantity: float | None = Query(None, description="Quantity. Ignored if usd_value is set."),
+    usd_value: float | None = Query(None, gt=0, description="Target notional in USD (e.g. 1 for 1 USD). Overrides quantity."),
+) -> Trade:
+    """Place a single test trade. Uses first open market and first model if not specified."""
+    settings = get_settings()
+    model = model_name or (settings.model_names[0] if settings.model_names else None)
+    if not model:
+        raise HTTPException(status_code=400, detail="No model configured; set MODEL_NAMES in .env")
+
+    if market_id is not None:
+        result = await db.execute(select(Market).where(Market.id == market_id))
+        market = result.scalar_one_or_none()
+        if not market:
+            raise HTTPException(status_code=404, detail=f"Market {market_id} not found")
+    else:
+        result = await db.execute(select(Market).where(Market.status == "open").order_by(Market.id.asc()).limit(1))
+        market = result.scalar_one_or_none()
+        if not market:
+            raise HTTPException(
+                status_code=400,
+                detail="No open market found. Sync markets first: POST /markets/sync",
+            )
+
+    price = float(market.yes_price) if side.upper() == "YES" else float(market.no_price)
+    if side.upper() not in ("YES", "NO"):
+        raise HTTPException(status_code=400, detail="side must be YES or NO")
+
+    if usd_value is not None:
+        quantity = usd_value / price if price > 0 else 0.1
+    elif quantity is None or quantity <= 0:
+        quantity = 0.1
+    if quantity <= 0 or quantity > 10000:
+        raise HTTPException(status_code=400, detail="Computed quantity out of range")
+
+    engine = TradingEngine()
+    order = TradeCreate(
+        market_id=market.id,
+        model_name=model,
+        side=side.upper(),
+        quantity=quantity,
+        price=price,
+    )
+    try:
+        logger.info("Test trade: market_id=%s model=%s side=%s qty=%s price=%s", market.id, model, side, quantity, price)
+        trade = await engine.execute_trade(db, order)
+        return trade
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc

@@ -13,9 +13,10 @@ Full-stack foundation for a Polymarket-style prediction trading platform with:
 2. Start (local, no Docker):
    - `./start.sh` — on Linux (Ubuntu/Debian) this installs PostgreSQL, creates the `nof1` database and user, and sets `DATABASE_URL` in `.env`.
    - Or with Docker: `./start.sh docker`
-3. Open in browser:
-   - **Dashboard:** [http://localhost:8000/dashboard](http://localhost:8000/dashboard) (or [http://localhost:8000/](http://localhost:8000/))
-   - **API docs:** [http://localhost:8000/docs](http://localhost:8000/docs)
+3. Open in browser (replace with your server IP when deploying, e.g. `http://159.89.172.175:8000`):
+   - **Dashboard:** `/dashboard` or `/`
+   - **API docs:** `/docs`
+   - Optional: set `OPENROUTER_SITE_URL` in `.env` to your public URL (e.g. `http://159.89.172.175:8000`) for OpenRouter referrer.
 
 ## What Is Included
 
@@ -40,3 +41,22 @@ Auto claimer is integrated and can be enabled with:
 - `WALLET_ADDRESS=...` (optional; use for Safe/proxy flow)
 
 Claim records are visible at `GET /admin/auto-claims`.
+
+## Test trade (1 USD)
+
+With the backend running and `.env` set (e.g. `ENABLE_LIVE_TRADING=true` and a model `private_key` in `MODEL_ACCOUNT_CONFIGS`):
+
+```bash
+# Optional: sync markets first
+curl -X POST "http://127.0.0.1:8000/markets/sync"
+
+# Place one test trade with 1 USD notional
+curl -X POST "http://127.0.0.1:8000/admin/test-trade?usd_value=1"
+```
+
+Or use the script (defaults to `http://127.0.0.1:8000`; set `BASE_URL` for deployment):
+
+```bash
+./scripts/test-trade-1usd.sh
+# On deployment: BASE_URL=http://159.89.172.175:8000 ./scripts/test-trade-1usd.sh
+```

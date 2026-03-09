@@ -235,6 +235,7 @@ class AutoClaimer:
 
         while self.running:
             try:
+                logger.info("Auto claimer: scanning for claimable positions (models: %s)", ", ".join(models_with_key))
                 w3 = _connect_web3(self.settings)
                 if not w3:
                     logger.error("Auto claimer: cannot connect to POLYGON_RPC_URL from .env")
@@ -242,6 +243,7 @@ class AutoClaimer:
                     continue
 
                 for model_name in models_with_key:
+                    logger.info("Auto claimer: scanning trades for model=%s", model_name)
                     client = _build_client_for_model(self.settings, model_name)
                     if not client:
                         continue

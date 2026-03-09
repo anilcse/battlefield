@@ -1,6 +1,7 @@
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from app.api.routes.admin import router as admin_router
@@ -15,6 +16,7 @@ from app.db.session import engine
 from app.models.base import Base
 from app.services.auto_claimer import start_auto_claimer, stop_auto_claimer
 from app.services.game_engine import start_game_engine, stop_game_engine
+from app.services.startup_seed import seed_test_trades_on_first_start
 
 settings = get_settings()
 
@@ -22,6 +24,7 @@ settings = get_settings()
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     await create_tables(engine)
+    await seed_test_trades_on_first_start()
     start_auto_claimer()
     await start_game_engine()
     yield
@@ -35,6 +38,13 @@ async def create_tables(db_engine: AsyncEngine) -> None:
 
 
 app = FastAPI(title=settings.app_name, lifespan=lifespan)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 app.include_router(health_router)
 app.include_router(markets_router)
 app.include_router(forecasts_router)
