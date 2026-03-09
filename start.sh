@@ -39,8 +39,8 @@ install_linux_deps() {
   fi
 
   if [ "${1:-}" = "local" ]; then
-    if ! command -v python3 &>/dev/null; then
-      echo "Installing Python3..."
+    if ! command -v python3 &>/dev/null || ! python3 -c "import venv" 2>/dev/null; then
+      echo "Installing Python3 and venv..."
       sudo apt-get update -qq
       sudo apt-get install -y python3 python3-venv python3-pip
     fi
@@ -107,7 +107,8 @@ else
   setup_local_postgres
   echo "Local mode: installing deps and running backend (no Docker)..."
   VENV="${VENV:-.venv}"
-  if [ ! -d "$VENV" ]; then
+  if [ ! -f "$VENV/bin/activate" ]; then
+    echo "Creating virtual environment at $VENV..."
     python3 -m venv "$VENV"
   fi
   # shellcheck disable=SC1091
