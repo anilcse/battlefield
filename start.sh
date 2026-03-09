@@ -47,6 +47,40 @@ install_linux_deps() {
   fi
 }
 
+# Install and start PostgreSQL, create DB and user for local mode (Linux)
+setup_local_postgres() {
+  if [ ! -f /etc/os-release ]; then
+    return 0
+  fi
+  # shellcheck disable=SC1091
+  . /etc/os-release
+  if [ "$ID" != "ubuntu" ] && [ "$ID" != "debian" ] && [[ "${ID_LIKE:-}" != *"debian"* ]]; then
+    return 0
+  fi
+  if ! command -v psql &>/dev/null; then
+    echo "Installing PostgreSQL..."
+    sudo apt-get update -qq
+    sudo apt-get install -y postgresql postgresql-contrib
+  fi
+  if ! sudo systemctl is-active --quiet postgresql 2>/dev/null; then
+    echo "Starting PostgreSQL..."
+    sudo systemctl start postgresql
+    sudo systemctl enable postgresql 2>/dev/null || true
+  fi
+  # Create database and set password for postgres user (idempotent)
+  sudo -u postgres psql -tAc "SELECT 1 FROM pg_database WHERE datname='nof1'" | grep -q 1 || \
+    sudo -u postgres psql -c "CREATE DATABASE nof1;"
+  sudo -u postgres psql -c "ALTER USER postgres WITH PASSWORD 'postgres';" 2>/dev/null || true
+  # Point .env at local Postgres
+  if [ -f .env ]; then
+    if grep -q "^DATABASE_URL=" .env; then
+      sed -i.bak 's|^DATABASE_URL=.*|DATABASE_URL=postgresql+asyncpg://postgres:postgres@localhost:5432/nof1|' .env 2>/dev/null || true
+    else
+      echo "DATABASE_URL=postgresql+asyncpg://postgres:postgres@localhost:5432/nof1" >> .env
+    fi
+  fi
+}
+
 # Prefer docker compose (plugin); fallback to docker-compose (standalone)
 docker_compose_cmd() {
   if docker compose version &>/dev/null; then
@@ -70,8 +104,8 @@ if [ "${1:-}" = "docker" ]; then
   docker_compose_cmd up --build
 else
   install_linux_deps local
+  setup_local_postgres
   echo "Local mode: installing deps and running backend (no Docker)..."
-  echo "Ensure Postgres is running and DATABASE_URL in .env points to it."
   VENV="${VENV:-.venv}"
   if [ ! -d "$VENV" ]; then
     python3 -m venv "$VENV"

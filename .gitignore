@@ -1,5 +1,6 @@
 # Environment and secrets
 .env
+.env.bak
 .env.local
 .env.*.local
 model_config.json

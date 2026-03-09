@@ -10,11 +10,10 @@ Full-stack foundation for a Polymarket-style prediction trading platform with:
 
 1. Copy env file:
    - `cp .env.example .env`
-2. Set `DATABASE_URL` for local Postgres (e.g. `postgresql+asyncpg://postgres:postgres@localhost:5432/nof1`).
-3. Start (local, no Docker):
-   - `./start.sh`
+2. Start (local, no Docker):
+   - `./start.sh` — on Linux (Ubuntu/Debian) this installs PostgreSQL, creates the `nof1` database and user, and sets `DATABASE_URL` in `.env`.
    - Or with Docker: `./start.sh docker`
-4. Open API docs:
+3. Open API docs:
    - [http://localhost:8000/docs](http://localhost:8000/docs)
 
 ## What Is Included
