@@ -2,6 +2,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from app.api.routes.admin import router as admin_router
@@ -35,6 +36,22 @@ async def lifespan(_: FastAPI):
 async def create_tables(db_engine: AsyncEngine) -> None:
     async with db_engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+    await _add_missing_columns(db_engine)
+
+
+async def _add_missing_columns(db_engine: AsyncEngine) -> None:
+    """ALTER TABLE to add columns that create_all won't add to existing tables."""
+    migrations: list[str] = [
+        "ALTER TABLE markets ADD COLUMN IF NOT EXISTS yes_token_id VARCHAR(120)",
+        "ALTER TABLE markets ADD COLUMN IF NOT EXISTS no_token_id VARCHAR(120)",
+        "ALTER TABLE tournament_entries ADD COLUMN IF NOT EXISTS total_volume_usd FLOAT DEFAULT 0.0",
+    ]
+    async with db_engine.begin() as conn:
+        for sql in migrations:
+            try:
+                await conn.execute(text(sql))
+            except Exception:
+                pass
 
 
 app = FastAPI(title=settings.app_name, lifespan=lifespan)
