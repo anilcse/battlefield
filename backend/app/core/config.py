@@ -1,9 +1,45 @@
 import json
+from pathlib import Path
 from functools import lru_cache
-from typing import Dict, List
+from typing import Any, Dict, List
 
-from pydantic import field_validator
+from pydantic import Field, computed_field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+_DEFAULT_MODEL_NAMES = "openai/gpt-5,anthropic/claude-sonnet-4,x-ai/grok-4,google/gemini-3.1-pro-preview,deepseek/deepseek-v3.2-speciale"
+
+
+def _parse_model_names(value: str) -> List[str]:
+    if not (value or "").strip():
+        return [x.strip() for x in _DEFAULT_MODEL_NAMES.split(",") if x.strip()]
+    return [item.strip() for item in value.split(",") if item.strip()]
+
+
+def _load_model_config_json(path: str) -> Dict[str, Any]:
+    p = Path(path)
+    if not p.is_file():
+        return {}
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except (json.JSONDecodeError, OSError):
+        return {}
+
+
+def _normalize_account_configs(raw: Any) -> Dict[str, Dict[str, str]]:
+    if isinstance(raw, dict):
+        out: Dict[str, Dict[str, str]] = {}
+        for k, v in raw.items():
+            if isinstance(k, str) and isinstance(v, dict):
+                out[k.strip()] = {str(a): str(b) for a, b in v.items()}
+        return out
+    if isinstance(raw, str) and raw.strip():
+        try:
+            parsed = json.loads(raw)
+            return _normalize_account_configs(parsed)
+        except json.JSONDecodeError:
+            pass
+    return {}
 
 
 class Settings(BaseSettings):
@@ -37,39 +73,45 @@ class Settings(BaseSettings):
     game_edge_threshold: float = 0.10
 
     default_model_monthly_budget_usd: float = 100.0
-    model_names: List[str] = [
-        "openai/gpt-5",
-        "anthropic/claude-sonnet-4",
-        "x-ai/grok-4",
-        "google/gemini-3.1-pro-preview",
-        "deepseek/deepseek-v3.2-speciale",
-    ]
+    # Path to JSON file for model config (model_names, model_account_configs, default_model_monthly_budget_usd)
+    model_config_path: str = ""
+    # Store as str so env is never JSON-parsed (avoids JSONDecodeError when MODEL_NAMES is empty/unset)
+    model_names_raw: str = Field(default=_DEFAULT_MODEL_NAMES, validation_alias="MODEL_NAMES")
 
-    @field_validator("model_names", mode="before")
+    @model_validator(mode="before")
     @classmethod
-    def split_model_names(cls, value: str | List[str]) -> List[str]:
-        if isinstance(value, list):
-            return value
-        if not value:
-            return []
-        return [item.strip() for item in value.split(",") if item.strip()]
+    def inject_model_config_from_json(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        path = (data.get("model_config_path") or "").strip()
+        if not path:
+            for candidate in ("model_config.json", "backend/model_config.json", "../model_config.json"):
+                if Path(candidate).is_file():
+                    path = candidate
+                    break
+        if not path:
+            return data
+        j = _load_model_config_json(path)
+        if not j:
+            return data
+        if "model_names" in j:
+            v = j["model_names"]
+            data["model_names_raw"] = v if isinstance(v, str) else ",".join(str(x) for x in v) if v else data.get("model_names_raw", _DEFAULT_MODEL_NAMES)
+        if "model_account_configs" in j:
+            data["model_account_configs"] = _normalize_account_configs(j["model_account_configs"])
+        if "default_model_monthly_budget_usd" in j and isinstance(j["default_model_monthly_budget_usd"], (int, float)):
+            data["default_model_monthly_budget_usd"] = float(j["default_model_monthly_budget_usd"])
+        return data
+
+    @computed_field
+    @property
+    def model_names(self) -> List[str]:
+        return _parse_model_names(self.model_names_raw)
 
     @field_validator("model_account_configs", mode="before")
     @classmethod
     def parse_model_account_configs(cls, value: str | Dict[str, Dict[str, str]]) -> Dict[str, Dict[str, str]]:
-        if isinstance(value, dict):
-            return value
-        if not value:
-            return {}
-        parsed = json.loads(value)
-        if not isinstance(parsed, dict):
-            raise ValueError("MODEL_ACCOUNT_CONFIGS must be a JSON object")
-        out: Dict[str, Dict[str, str]] = {}
-        for model_name, model_cfg in parsed.items():
-            if not isinstance(model_name, str) or not isinstance(model_cfg, dict):
-                continue
-            out[model_name.strip()] = {str(k): str(v) for k, v in model_cfg.items()}
-        return out
+        return _normalize_account_configs(value) if value else {}
 
     def get_model_account(self, model_name: str) -> Dict[str, str]:
         model_cfg = self.model_account_configs.get(model_name, {})

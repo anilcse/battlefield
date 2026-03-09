@@ -1,0 +1,32 @@
+{
+  "model_names": [
+    "openai/gpt-5",
+    "anthropic/claude-sonnet-4",
+    "x-ai/grok-4",
+    "google/gemini-3.1-pro-preview",
+    "deepseek/deepseek-v3.2-speciale"
+  ],
+  "default_model_monthly_budget_usd": 100,
+  "model_account_configs": {
+    "openai/gpt-5": {
+      "private_key": "",
+      "wallet_address": ""
+    },
+    "anthropic/claude-sonnet-4": {
+      "private_key": "",
+      "wallet_address": ""
+    },
+    "x-ai/grok-4": {
+      "private_key": "",
+      "wallet_address": ""
+    },
+    "google/gemini-3.1-pro-preview": {
+      "private_key": "",
+      "wallet_address": ""
+    },
+    "deepseek/deepseek-v3.2-speciale": {
+      "private_key": "",
+      "wallet_address": ""
+    }
+  }
+}
