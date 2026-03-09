@@ -310,10 +310,12 @@ async def test_trade(
         raise HTTPException(status_code=400, detail="side must be YES or NO")
 
     if usd_value is not None:
-        quantity = usd_value / price if price > 0 else 0.1
+        quantity = usd_value / price if price > 0 else 5.0
     elif quantity is None or quantity <= 0:
-        quantity = 0.1
-    if quantity <= 0 or quantity > 10000:
+        quantity = 5.0 / price if price > 0 else 10.0
+    if quantity < 5:
+        quantity = 5.0
+    if quantity > 10000:
         raise HTTPException(status_code=400, detail="Computed quantity out of range")
 
     engine = TradingEngine()

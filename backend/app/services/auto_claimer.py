@@ -106,12 +106,14 @@ def _build_client_for_model(settings: Settings, model_name: str) -> Optional[Clo
     if not private_key:
         return None
     try:
+        sig_type = int(account_cfg.get("signature_type", settings.polymarket_signature_type))
+        funder = account_cfg.get("wallet_address") or None
         client = ClobClient(
             host=settings.polymarket_base_url,
             chain_id=settings.polymarket_chain_id,
             key=private_key,
-            signature_type=2,
-            funder=account_cfg.get("wallet_address") or None,
+            signature_type=sig_type,
+            funder=funder if sig_type > 0 else None,
         )
         creds = client.create_or_derive_api_creds()
         client.set_api_creds(creds)

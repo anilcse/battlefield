@@ -337,49 +337,8 @@ class GameEngine:
         return "\n".join(lines) if lines else "  No competitors yet."
 
     async def _sync_markets(self, session: AsyncSession) -> None:
-        from app.services.startup_seed import _normalize_status, _token_ids_from_item
-        try:
-            payload = await self.polymarket_client.fetch_markets(limit=100)
-            raw_items = payload.get("data", payload if isinstance(payload, list) else [])
-            count = 0
-            for item in raw_items:
-                external_id = str(item.get("id") or item.get("market_id") or "")
-                title = str(item.get("question") or item.get("title") or "").strip()
-                if not external_id or not title:
-                    continue
-                existing = await session.execute(select(Market).where(Market.polymarket_market_id == external_id))
-                market = existing.scalar_one_or_none()
-                yes_price = float(item.get("yesPrice") or item.get("yes_price") or 0.5)
-                no_price = float(item.get("noPrice") or item.get("no_price") or (1.0 - yes_price))
-                description = str(item.get("description") or "")
-                end_date_str = str(item.get("end_date_iso") or item.get("endDate") or "")
-                category = classify_market(title, description)
-                yes_token_id, no_token_id = _token_ids_from_item(item)
-                status = _normalize_status(str(item.get("status") or "open"))
-                if market is None:
-                    market = Market(
-                        polymarket_market_id=external_id,
-                        title=title, description=description, status=status,
-                        category=category, end_date=end_date_str,
-                        yes_price=yes_price, no_price=no_price,
-                        yes_token_id=yes_token_id, no_token_id=no_token_id,
-                    )
-                    session.add(market)
-                    count += 1
-                else:
-                    market.yes_price = yes_price
-                    market.no_price = no_price
-                    market.status = status
-                    market.category = category or market.category
-                    market.description = description or market.description
-                    if yes_token_id:
-                        market.yes_token_id = yes_token_id
-                    if no_token_id:
-                        market.no_token_id = no_token_id
-            await session.commit()
-            logger.info("Market sync: %d new, %d total items from API", count, len(raw_items))
-        except Exception as exc:
-            logger.warning("Market sync failed: %s", exc)
+        from app.services.startup_seed import _sync_markets_once
+        await _sync_markets_once(session)
 
     async def _resolve_paper_pnl(self, session: AsyncSession, tournament: Tournament) -> None:
         """
@@ -525,7 +484,7 @@ class GameEngine:
                 if price <= 0.01 or price >= 0.99:
                     continue
 
-                quantity = trade_size / price
+                quantity = max(5.0, trade_size / price)
                 token_id = chosen["yes_token_id"] if side == "YES" else chosen["no_token_id"]
 
                 session.add(Forecast(

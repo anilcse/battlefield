@@ -55,6 +55,7 @@ class Settings(BaseSettings):
     polymarket_passphrase: str = ""
     polymarket_chain_id: int = 137
     enable_live_trading: bool = False
+    polymarket_signature_type: int = 1  # 0=EOA, 1=POLY_PROXY, 2=POLY_GNOSIS_SAFE
     openrouter_base_url: str = "https://openrouter.ai/api/v1"
     openrouter_api_key: str = ""
     openrouter_app_name: str = "nof1-polymarket-clone"
@@ -121,6 +122,7 @@ class Settings(BaseSettings):
             "polymarket_passphrase": model_cfg.get("polymarket_passphrase", self.polymarket_passphrase),
             "private_key": model_cfg.get("private_key", self.private_key),
             "wallet_address": model_cfg.get("wallet_address", self.wallet_address),
+            "signature_type": model_cfg.get("signature_type", str(self.polymarket_signature_type)),
         }
 
 
