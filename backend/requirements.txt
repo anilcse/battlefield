@@ -1,0 +1,13 @@
+fastapi
+uvicorn[standard]
+sqlalchemy
+asyncpg
+pydantic
+pydantic-settings
+httpx
+tenacity
+python-dateutil
+pytest
+web3
+eth-account
+py-clob-client
