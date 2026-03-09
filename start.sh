@@ -106,14 +106,13 @@ else
   install_linux_deps local
   setup_local_postgres
   echo "Local mode: installing deps and running backend (no Docker)..."
-  VENV="${VENV:-.venv}"
+  ROOT="$(pwd)"
+  VENV="${VENV:-$ROOT/.venv}"
   if [ ! -f "$VENV/bin/activate" ]; then
     echo "Creating virtual environment at $VENV..."
     python3 -m venv "$VENV"
   fi
-  # shellcheck disable=SC1091
-  source "$VENV/bin/activate"
-  pip install -q -r backend/requirements.txt
+  "$VENV/bin/pip" install -q -r backend/requirements.txt
   [ -f .env ] && cp .env backend/.env
-  cd backend && exec uvicorn app.main:app --host 0.0.0.0 --port 8000
+  cd backend && exec "$VENV/bin/python" -m uvicorn app.main:app --host 0.0.0.0 --port 8000
 fi
