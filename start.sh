@@ -108,11 +108,16 @@ else
   echo "Local mode: installing deps and running backend (no Docker)..."
   ROOT="$(pwd)"
   VENV="${VENV:-$ROOT/.venv}"
-  if [ ! -f "$VENV/bin/activate" ]; then
+  PY="$VENV/bin/python"
+  if [ ! -x "$PY" ]; then
     echo "Creating virtual environment at $VENV..."
     python3 -m venv "$VENV"
   fi
-  "$VENV/bin/pip" install -q -r backend/requirements.txt
+  if ! "$PY" -m pip --version &>/dev/null; then
+    echo "Bootstrapping pip in venv..."
+    "$PY" -m ensurepip --upgrade
+  fi
+  "$PY" -m pip install -q -r backend/requirements.txt
   [ -f .env ] && cp .env backend/.env
-  cd backend && exec "$VENV/bin/python" -m uvicorn app.main:app --host 0.0.0.0 --port 8000
+  cd backend && exec "$PY" -m uvicorn app.main:app --host 0.0.0.0 --port 8000
 fi
