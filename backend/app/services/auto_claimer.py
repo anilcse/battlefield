@@ -100,25 +100,25 @@ SAFE_MIN_ABI = [
 ]
 
 
-def _build_client(settings: Settings) -> Optional[ClobClient]:
-    if not settings.private_key:
-        logger.warning("Auto claimer disabled: PRIVATE_KEY is missing")
+def _build_client_for_model(settings: Settings, model_name: str) -> Optional[ClobClient]:
+    account_cfg = settings.get_model_account(model_name)
+    private_key = (account_cfg.get("private_key") or "").strip()
+    if not private_key:
         return None
-    if not (settings.polymarket_api_key and settings.polymarket_secret and settings.polymarket_passphrase):
-        logger.warning("Auto claimer disabled: CLOB API credentials are missing")
+    try:
+        client = ClobClient(
+            host=settings.polymarket_base_url,
+            chain_id=settings.polymarket_chain_id,
+            key=private_key,
+            signature_type=2,
+            funder=account_cfg.get("wallet_address") or None,
+        )
+        creds = client.create_or_derive_api_creds()
+        client.set_api_creds(creds)
+        return client
+    except Exception as exc:
+        logger.warning("Auto claimer: could not build client for model %s: %s", model_name, exc)
         return None
-    return ClobClient(
-        host=settings.polymarket_base_url,
-        chain_id=settings.polymarket_chain_id,
-        key=settings.private_key,
-        creds=ApiCreds(
-            api_key=settings.polymarket_api_key,
-            api_secret=settings.polymarket_secret,
-            api_passphrase=settings.polymarket_passphrase,
-        ),
-        signature_type=2,
-        funder=settings.wallet_address or None,
-    )
 
 
 def _extract_condition_ids_from_trades(trades_payload: object) -> Set[str]:
@@ -170,12 +170,13 @@ class AutoClaimer:
         self._thread: Optional[threading.Thread] = None
         self.settings = get_settings()
 
-    async def _claimed_before(self, condition_id: str, index_set: int) -> bool:
+    async def _claimed_before(self, condition_id: str, index_set: int, model_name: str) -> bool:
         async with SessionLocal() as session:
             result = await session.execute(
                 select(AutoClaim).where(
                     AutoClaim.condition_id == condition_id,
                     AutoClaim.index_set == index_set,
+                    AutoClaim.model_name == model_name,
                     AutoClaim.status == "claimed",
                 )
             )
@@ -185,6 +186,7 @@ class AutoClaimer:
         self,
         condition_id: str,
         index_set: int,
+        model_name: str,
         token_id: str,
         amount_redeemed: str,
         status: str,
@@ -193,13 +195,18 @@ class AutoClaimer:
     ) -> None:
         async with SessionLocal() as session:
             result = await session.execute(
-                select(AutoClaim).where(AutoClaim.condition_id == condition_id, AutoClaim.index_set == index_set)
+                select(AutoClaim).where(
+                    AutoClaim.condition_id == condition_id,
+                    AutoClaim.index_set == index_set,
+                    AutoClaim.model_name == model_name,
+                )
             )
             row = result.scalar_one_or_none()
             if row is None:
                 row = AutoClaim(
                     condition_id=condition_id,
                     index_set=index_set,
+                    model_name=model_name,
                     token_id=token_id,
                     amount_redeemed=amount_redeemed,
                     tx_hash=tx_hash,
@@ -216,14 +223,14 @@ class AutoClaimer:
             await session.commit()
 
     def _loop(self) -> None:
-        client = _build_client(self.settings)
-        if not client:
+        models_with_key = [
+            name for name in self.settings.model_names
+            if (self.settings.get_model_account(name).get("private_key") or "").strip()
+        ]
+        if not models_with_key:
+            logger.warning("Auto claimer disabled: no model in MODEL_ACCOUNT_CONFIGS has private_key set")
             return
 
-        wallet = Web3.to_checksum_address(self.settings.wallet_address) if self.settings.wallet_address else None
-        account = Account.from_key(self.settings.private_key)
-        signer = Web3.to_checksum_address(account.address)
-        warned_proxy_wallet = False
         null_addr = Web3.to_checksum_address("0x0000000000000000000000000000000000000000")
 
         while self.running:
@@ -234,158 +241,163 @@ class AutoClaimer:
                     time.sleep(self.loop_seconds)
                     continue
 
-                conditional_addr = Web3.to_checksum_address(client.get_conditional_address())
-                collateral_addr = Web3.to_checksum_address(client.get_collateral_address())
-                conditional = w3.eth.contract(address=conditional_addr, abi=CONDITIONAL_TOKENS_MIN_ABI)
-                erc1155 = w3.eth.contract(address=conditional_addr, abi=ERC1155_MIN_ABI)
-                safe_contract = w3.eth.contract(address=wallet, abi=SAFE_MIN_ABI) if wallet else None
+                for model_name in models_with_key:
+                    client = _build_client_for_model(self.settings, model_name)
+                    if not client:
+                        continue
+                    account_cfg = self.settings.get_model_account(model_name)
+                    account = Account.from_key(account_cfg["private_key"])
+                    signer = Web3.to_checksum_address(account.address)  # EOA derived from private_key
+                    wallet = Web3.to_checksum_address(account_cfg["wallet_address"]) if account_cfg.get("wallet_address") else None  # Polymarket proxy (positions live here; can differ from signer)
 
-                if wallet and wallet.lower() != signer.lower() and not warned_proxy_wallet:
-                    logger.warning(
-                        "Auto claimer: WALLET_ADDRESS (%s) != signer (%s). Direct redeem tx can only redeem signer balances.",
-                        wallet,
-                        signer,
-                    )
-                    warned_proxy_wallet = True
+                    conditional_addr = Web3.to_checksum_address(client.get_conditional_address())
+                    collateral_addr = Web3.to_checksum_address(client.get_collateral_address())
+                    conditional = w3.eth.contract(address=conditional_addr, abi=CONDITIONAL_TOKENS_MIN_ABI)
+                    erc1155 = w3.eth.contract(address=conditional_addr, abi=ERC1155_MIN_ABI)
+                    safe_contract = w3.eth.contract(address=wallet, abi=SAFE_MIN_ABI) if wallet else None
 
-                condition_ids: Set[str] = set()
-                try:
-                    trades = client.get_trades()
-                    condition_ids |= _extract_condition_ids_from_trades(trades)
-                except Exception as exc:
-                    logger.error("Auto claimer get_trades failed: %s", exc)
-
-                for condition_id in condition_ids:
+                    condition_ids: Set[str] = set()
                     try:
-                        market = client.get_market(condition_id)
-                    except Exception:
+                        trades = client.get_trades()
+                        condition_ids |= _extract_condition_ids_from_trades(trades)
+                    except Exception as exc:
+                        logger.error("Auto claimer get_trades failed for %s: %s", model_name, exc)
                         continue
-                    if not market or not market.get("closed", False):
-                        continue
 
-                    winners = _winning_tokens(market)
-                    for winner in winners:
-                        token_id = winner["token_id"]
-                        index_set = int(winner["index_set"])
-                        if asyncio.run(self._claimed_before(condition_id, index_set)):
-                            continue
-
-                        signer_balance = erc1155.functions.balanceOf(signer, int(token_id)).call()
-                        wallet_balance = 0
-                        if wallet and wallet.lower() != signer.lower():
-                            wallet_balance = erc1155.functions.balanceOf(wallet, int(token_id)).call()
-
-                        use_safe_flow = bool(wallet and wallet.lower() != signer.lower() and int(wallet_balance) > 0)
-                        if int(signer_balance) <= 0 and not use_safe_flow:
-                            continue
-
+                    for condition_id in condition_ids:
                         try:
-                            nonce = w3.eth.get_transaction_count(account.address, "pending")
-                            redeem_data_hex = conditional.functions.redeemPositions(
-                                collateral_addr, b"\x00" * 32, bytes.fromhex(condition_id[2:]), [index_set]
-                            )._encode_transaction_data()
-                            redeem_data = bytes.fromhex(redeem_data_hex[2:])
+                            market = client.get_market(condition_id)
+                        except Exception:
+                            continue
+                        if not market or not market.get("closed", False):
+                            continue
 
-                            if use_safe_flow and safe_contract is not None:
-                                safe_nonce = safe_contract.functions.nonce().call()
-                                safe_tx_hash = safe_contract.functions.getTransactionHash(
-                                    conditional_addr,
-                                    0,
-                                    redeem_data,
-                                    0,
-                                    0,
-                                    0,
-                                    0,
-                                    null_addr,
-                                    null_addr,
-                                    safe_nonce,
-                                ).call()
-                                signed_safe = account.sign_message(encode_defunct(hexstr=safe_tx_hash.hex()))
-                                safe_v = signed_safe.v + 4 if signed_safe.v in (27, 28) else signed_safe.v
-                                safe_signature = (
-                                    int(signed_safe.r).to_bytes(32, "big")
-                                    + int(signed_safe.s).to_bytes(32, "big")
-                                    + bytes([safe_v])
-                                )
+                        winners = _winning_tokens(market)
+                        for winner in winners:
+                            token_id = winner["token_id"]
+                            index_set = int(winner["index_set"])
+                            if asyncio.run(self._claimed_before(condition_id, index_set, model_name)):
+                                continue
 
-                                tx = safe_contract.functions.execTransaction(
-                                    conditional_addr,
-                                    0,
-                                    redeem_data,
-                                    0,
-                                    0,
-                                    0,
-                                    0,
-                                    null_addr,
-                                    null_addr,
-                                    safe_signature,
-                                ).build_transaction(
-                                    {
-                                        "from": account.address,
-                                        "nonce": nonce,
-                                        "chainId": self.settings.polymarket_chain_id,
-                                    }
-                                )
-                                amount_redeemed = str(wallet_balance)
-                            else:
-                                tx = conditional.functions.redeemPositions(
-                                    collateral_addr,
-                                    b"\x00" * 32,
-                                    bytes.fromhex(condition_id[2:]),
-                                    [index_set],
-                                ).build_transaction(
-                                    {
-                                        "from": account.address,
-                                        "nonce": nonce,
-                                        "chainId": self.settings.polymarket_chain_id,
-                                    }
-                                )
-                                amount_redeemed = str(signer_balance)
+                            signer_balance = erc1155.functions.balanceOf(signer, int(token_id)).call()
+                            wallet_balance = 0
+                            if wallet and wallet.lower() != signer.lower():
+                                wallet_balance = erc1155.functions.balanceOf(wallet, int(token_id)).call()
 
-                            gas_estimate = w3.eth.estimate_gas(tx)
-                            tx["gas"] = int(gas_estimate * 1.2)
-                            tx["maxFeePerGas"] = w3.eth.gas_price
-                            tx["maxPriorityFeePerGas"] = min(w3.eth.gas_price, Web3.to_wei(40, "gwei"))
+                            use_safe_flow = bool(wallet and wallet.lower() != signer.lower() and int(wallet_balance) > 0)
+                            if int(signer_balance) <= 0 and not use_safe_flow:
+                                continue
 
-                            signed = account.sign_transaction(tx)
-                            raw_tx = getattr(signed, "raw_transaction", None) or getattr(signed, "rawTransaction")
-                            tx_hash = w3.eth.send_raw_transaction(raw_tx)
-                            receipt = w3.eth.wait_for_transaction_receipt(tx_hash, timeout=180)
-                            status = "claimed" if receipt.status == 1 else "failed"
-                            tx_hash_hex = receipt.transactionHash.hex()
+                            try:
+                                nonce = w3.eth.get_transaction_count(account.address, "pending")
+                                redeem_data_hex = conditional.functions.redeemPositions(
+                                    collateral_addr, b"\x00" * 32, bytes.fromhex(condition_id[2:]), [index_set]
+                                )._encode_transaction_data()
+                                redeem_data = bytes.fromhex(redeem_data_hex[2:])
 
-                            asyncio.run(
-                                self._record_claim(
-                                    condition_id=condition_id,
-                                    index_set=index_set,
-                                    token_id=token_id,
-                                    amount_redeemed=amount_redeemed,
-                                    status=status,
-                                    tx_hash=tx_hash_hex,
-                                    error="" if status == "claimed" else "redeem tx reverted",
+                                if use_safe_flow and safe_contract is not None:
+                                    safe_nonce = safe_contract.functions.nonce().call()
+                                    safe_tx_hash = safe_contract.functions.getTransactionHash(
+                                        conditional_addr,
+                                        0,
+                                        redeem_data,
+                                        0,
+                                        0,
+                                        0,
+                                        0,
+                                        null_addr,
+                                        null_addr,
+                                        safe_nonce,
+                                    ).call()
+                                    signed_safe = account.sign_message(encode_defunct(hexstr=safe_tx_hash.hex()))
+                                    safe_v = signed_safe.v + 4 if signed_safe.v in (27, 28) else signed_safe.v
+                                    safe_signature = (
+                                        int(signed_safe.r).to_bytes(32, "big")
+                                        + int(signed_safe.s).to_bytes(32, "big")
+                                        + bytes([safe_v])
+                                    )
+
+                                    tx = safe_contract.functions.execTransaction(
+                                        conditional_addr,
+                                        0,
+                                        redeem_data,
+                                        0,
+                                        0,
+                                        0,
+                                        0,
+                                        null_addr,
+                                        null_addr,
+                                        safe_signature,
+                                    ).build_transaction(
+                                        {
+                                            "from": account.address,
+                                            "nonce": nonce,
+                                            "chainId": self.settings.polymarket_chain_id,
+                                        }
+                                    )
+                                    amount_redeemed = str(wallet_balance)
+                                else:
+                                    tx = conditional.functions.redeemPositions(
+                                        collateral_addr,
+                                        b"\x00" * 32,
+                                        bytes.fromhex(condition_id[2:]),
+                                        [index_set],
+                                    ).build_transaction(
+                                        {
+                                            "from": account.address,
+                                            "nonce": nonce,
+                                            "chainId": self.settings.polymarket_chain_id,
+                                        }
+                                    )
+                                    amount_redeemed = str(signer_balance)
+
+                                gas_estimate = w3.eth.estimate_gas(tx)
+                                tx["gas"] = int(gas_estimate * 1.2)
+                                tx["maxFeePerGas"] = w3.eth.gas_price
+                                tx["maxPriorityFeePerGas"] = min(w3.eth.gas_price, Web3.to_wei(40, "gwei"))
+
+                                signed = account.sign_transaction(tx)
+                                raw_tx = getattr(signed, "raw_transaction", None) or getattr(signed, "rawTransaction")
+                                tx_hash = w3.eth.send_raw_transaction(raw_tx)
+                                receipt = w3.eth.wait_for_transaction_receipt(tx_hash, timeout=180)
+                                status = "claimed" if receipt.status == 1 else "failed"
+                                tx_hash_hex = receipt.transactionHash.hex()
+
+                                asyncio.run(
+                                    self._record_claim(
+                                        condition_id=condition_id,
+                                        index_set=index_set,
+                                        model_name=model_name,
+                                        token_id=token_id,
+                                        amount_redeemed=amount_redeemed,
+                                        status=status,
+                                        tx_hash=tx_hash_hex,
+                                        error="" if status == "claimed" else "redeem tx reverted",
+                                    )
                                 )
-                            )
-                            if status == "claimed":
-                                logger.info(
-                                    "Auto claimer claimed: condition=%s index_set=%s amount=%s tx=%s",
-                                    condition_id,
-                                    index_set,
-                                    amount_redeemed,
-                                    tx_hash_hex,
+                                if status == "claimed":
+                                    logger.info(
+                                        "Auto claimer claimed: model=%s condition=%s index_set=%s amount=%s tx=%s",
+                                        model_name,
+                                        condition_id,
+                                        index_set,
+                                        amount_redeemed,
+                                        tx_hash_hex,
+                                    )
+                            except Exception as claim_exc:
+                                asyncio.run(
+                                    self._record_claim(
+                                        condition_id=condition_id,
+                                        index_set=index_set,
+                                        model_name=model_name,
+                                        token_id=token_id,
+                                        amount_redeemed=str(wallet_balance if use_safe_flow else signer_balance),
+                                        status="failed",
+                                        tx_hash="",
+                                        error=str(claim_exc),
+                                    )
                                 )
-                        except Exception as claim_exc:
-                            asyncio.run(
-                                self._record_claim(
-                                    condition_id=condition_id,
-                                    index_set=index_set,
-                                    token_id=token_id,
-                                    amount_redeemed=str(wallet_balance if use_safe_flow else signer_balance),
-                                    status="failed",
-                                    tx_hash="",
-                                    error=str(claim_exc),
-                                )
-                            )
-                            logger.error("Auto claimer claim failed for %s: %s", condition_id, claim_exc)
+                                logger.error("Auto claimer claim failed for %s %s: %s", model_name, condition_id, claim_exc)
             except Exception as loop_exc:
                 logger.error("Auto claimer loop error: %s", loop_exc)
 

@@ -95,6 +95,7 @@ async def list_auto_claims(limit: int = 100, db: AsyncSession = Depends(get_db))
         {
             "condition_id": row.condition_id,
             "index_set": row.index_set,
+            "model_name": getattr(row, "model_name", "") or "",
             "token_id": row.token_id,
             "amount_redeemed": row.amount_redeemed,
             "tx_hash": row.tx_hash,
