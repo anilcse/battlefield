@@ -6,7 +6,8 @@ from typing import Any, Dict, List
 from pydantic import Field, computed_field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-_DEFAULT_MODEL_NAMES = "openai/gpt-5,anthropic/claude-sonnet-4,x-ai/grok-4,google/gemini-3.1-pro-preview,deepseek/deepseek-v3.2-speciale"
+# Top prediction-market models (benchmarks: GPT-4/Claude/Gemini lead; DeepSeek R1 for reasoning)
+_DEFAULT_MODEL_NAMES = "openai/gpt-5.2-pro,anthropic/claude-sonnet-4.5,anthropic/claude-opus-4.5,google/gemini-2.5-pro-preview,deepseek/deepseek-r1-0528"
 
 
 def _parse_model_names(value: str) -> List[str]:
@@ -67,7 +68,7 @@ class Settings(BaseSettings):
     auto_claim_interval_seconds: int = 600
     model_account_configs: Dict[str, Dict[str, str]] = {}
     game_loop_enabled: bool = False
-    game_loop_interval_seconds: int = 3600
+    game_loop_interval_seconds: int = 300
     tournament_duration_days: int = 7
     tournament_start_budget_usd: float = 100.0
     game_trade_size_usd: float = 5.0

@@ -26,6 +26,13 @@ Full-stack foundation for a Polymarket-style prediction trading platform with:
 - Monthly budget guardrails for each model (set to `$100` by default)
 - REST APIs for markets, forecasts, and order execution
 
+## Models & Optimization
+
+Default models are chosen for prediction-market performance (benchmarks: GPT-4/Claude/Gemini lead; DeepSeek R1 for reasoning):
+- `openai/gpt-5.2-pro`, `anthropic/claude-sonnet-4.5`, `anthropic/claude-opus-4.5`, `google/gemini-2.5-pro-preview`, `deepseek/deepseek-r1-0528`
+
+Prompts use chain-of-thought reasoning and calibration hints. Set `GAME_EDGE_THRESHOLD` (default 0.08 = 8%) to require minimum edge before trading. Override `MODEL_NAMES` and `MODEL_ACCOUNT_CONFIGS` in `.env` or `model_config.json`.
+
 ## Notes
 
 - This is a serious starting implementation, not a complete production exchange.

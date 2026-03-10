@@ -54,7 +54,7 @@ class OpenRouterClient:
 
         body = {
             "model": model_name,
-            "temperature": 0.3,
+            "temperature": 0.2,
             "messages": [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": prompt},

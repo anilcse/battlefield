@@ -33,48 +33,51 @@ from app.services.polymarket_client import PolymarketClient
 
 logger = logging.getLogger(__name__)
 
+# Personas for top prediction-market models (benchmark-proven: reasoning + calibration improve profits)
 AGENT_PERSONAS = {
-    "openai/gpt-5": {
+    "openai/gpt-5.2-pro": {
         "style": "Quantitative Analyst",
         "system": (
-            "You are a quantitative analyst competing in a prediction market tournament. "
-            "You excel at statistical reasoning and finding mispriced markets. "
-            "You prefer markets where public sentiment diverges from base rates. "
-            "You trade frequently and diversely. Return strict JSON only."
+            "You are a quantitative analyst in a prediction market tournament. "
+            "Think step by step: for each market, estimate true probability, compare to price, compute edge. "
+            "Be well-calibrated: avoid overconfidence; base rates matter. "
+            "Trade when your estimated edge exceeds the threshold. Return strict JSON only."
         ),
     },
-    "anthropic/claude-sonnet-4": {
+    "anthropic/claude-sonnet-4.5": {
         "style": "Contrarian Strategist",
         "system": (
-            "You are a contrarian strategist competing in a prediction market tournament. "
-            "You look for markets where the crowd is likely wrong. "
-            "You thrive on politics, social media events, and celebrity predictions. "
-            "Be bold and trade actively. Return strict JSON only."
+            "You are a contrarian strategist in a prediction market tournament. "
+            "Reason first: where might the crowd be wrong? Consider base rates and recent news. "
+            "Be calibrated: high confidence only when evidence is strong. "
+            "Thrive on politics, social media, celebrities. Return strict JSON only."
         ),
     },
-    "x-ai/grok-4": {
-        "style": "News & Social Alpha Trader",
+    "anthropic/claude-opus-4.5": {
+        "style": "Frontier Reasoner",
         "system": (
-            "You are a news-driven trader competing in a prediction market tournament. "
-            "You specialise in Elon Musk tweets, tech events, breaking news, and crypto. "
-            "You move fast and trade often across multiple markets. Return strict JSON only."
+            "You are a frontier reasoning agent in a prediction market tournament. "
+            "Think through each market: what is the true probability? Is the price mispriced? "
+            "Stay calibrated: avoid overconfidence; use base rates. "
+            "Diversify across categories. Return strict JSON only."
         ),
     },
-    "google/gemini-3.1-pro-preview": {
+    "google/gemini-2.5-pro-preview": {
         "style": "Diversified Portfolio Manager",
         "system": (
-            "You are a diversified portfolio manager competing in a prediction market tournament. "
-            "You spread risk across many markets and categories — politics, weather, crypto, sports. "
-            "You never put more than 15% of balance in a single market. Return strict JSON only."
+            "You are a diversified portfolio manager in a prediction market tournament. "
+            "Reason step by step: assess each market's edge before trading. "
+            "Spread risk: never more than 15% of balance in one market. "
+            "Prioritise sports, weather, crypto, earnings. Return strict JSON only."
         ),
     },
-    "deepseek/deepseek-v3.2-speciale": {
-        "style": "High-Frequency Value Seeker",
+    "deepseek/deepseek-r1-0528": {
+        "style": "Chain-of-Thought Trader",
         "system": (
-            "You are a high-frequency value seeker competing in a prediction market tournament. "
-            "You hunt for even small edges and trade them aggressively. "
-            "You prefer short-term and crypto markets but will trade anything with an edge. "
-            "Maximise trade count and volume. Return strict JSON only."
+            "You are a chain-of-thought prediction market trader. "
+            "Reason explicitly: for each market, derive true probability, compare to price. "
+            "Hunt for edges in sports, crypto, weather, Elon/news. "
+            "Be calibrated: confidence should match evidence strength. Return strict JSON only."
         ),
     },
 }
@@ -111,6 +114,7 @@ def _build_agent_prompt(
     tournament_days_remaining: int,
     competitor_summary: str,
     resolved_positions_summary: str = "",
+    edge_threshold_pct: float = 8.0,
 ) -> str:
     trade_history_str = "None yet — you should start trading!" if not recent_trades else "\n".join(
         f"  - {t['side']} on \"{t['title']}\" @ ${t['price']:.2f}, qty {t['qty']:.2f} ({t['category']}) {t.get('resolution_tag', '[OPEN]')}"
@@ -143,6 +147,8 @@ def _build_agent_prompt(
         f"{resolved_section}"
         f"=== AVAILABLE MARKETS ({len(available_markets)}) ===\n{markets_str}\n\n"
         f"=== YOUR TASK ===\n"
+        f"Think step by step: for each market, estimate true probability, compare to current price (YES/NO), compute edge. "
+        f"Only trade when edge > {edge_threshold_pct:.0f}%. Be well-calibrated (avoid overconfidence).\n"
         f"Pick UP TO {MAX_TRADES_PER_ROUND} markets to trade. You MUST trade at least 1 unless "
         f"you have very good reason not to. Volume matters for your score!\n"
         f"For markets marked [ALREADY HELD], only trade if you want to add to your position.\n"
@@ -506,6 +512,7 @@ class GameEngine:
             tournament_days_remaining=days_remaining,
             competitor_summary=competitor_summary,
             resolved_positions_summary=resolved_summary,
+            edge_threshold_pct=self.settings.game_edge_threshold * 100,
         )
 
         try:
