@@ -56,7 +56,7 @@ class Settings(BaseSettings):
     polymarket_passphrase: str = ""
     polymarket_chain_id: int = 137
     enable_live_trading: bool = False
-    polymarket_signature_type: int = 1  # 0=EOA, 1=POLY_PROXY, 2=POLY_GNOSIS_SAFE
+    polymarket_signature_type: int = 2  # 0=EOA, 1=POLY_PROXY, 2=POLY_GNOSIS_SAFE (use 2 for Polymarket proxy wallets)
     openrouter_base_url: str = "https://openrouter.ai/api/v1"
     openrouter_api_key: str = ""
     openrouter_app_name: str = "nof1-polymarket-clone"
@@ -115,8 +115,26 @@ class Settings(BaseSettings):
     def parse_model_account_configs(cls, value: str | Dict[str, Dict[str, str]]) -> Dict[str, Dict[str, str]]:
         return _normalize_account_configs(value) if value else {}
 
+    # Aliases for config lookup: old model ID -> new (or vice versa)
+    _MODEL_CONFIG_ALIASES: Dict[str, List[str]] = {
+        "openai/gpt-5": ["openai/gpt-5.2-pro"],
+        "openai/gpt-5.2-pro": ["openai/gpt-5"],
+        "anthropic/claude-sonnet-4": ["anthropic/claude-sonnet-4.5"],
+        "anthropic/claude-sonnet-4.5": ["anthropic/claude-sonnet-4"],
+        "google/gemini-3.1-pro-preview": ["google/gemini-2.5-pro-preview"],
+        "google/gemini-2.5-pro-preview": ["google/gemini-3.1-pro-preview"],
+        "deepseek/deepseek-v3.2-speciale": ["deepseek/deepseek-r1-0528"],
+        "deepseek/deepseek-r1-0528": ["deepseek/deepseek-v3.2-speciale"],
+    }
+
     def get_model_account(self, model_name: str) -> Dict[str, str]:
-        model_cfg = self.model_account_configs.get(model_name, {})
+        model_cfg = self.model_account_configs.get(model_name)
+        if model_cfg is None and model_name in self._MODEL_CONFIG_ALIASES:
+            for alt in self._MODEL_CONFIG_ALIASES[model_name]:
+                model_cfg = self.model_account_configs.get(alt)
+                if model_cfg is not None:
+                    break
+        model_cfg = model_cfg or {}
         return {
             "polymarket_api_key": model_cfg.get("polymarket_api_key", self.polymarket_api_key),
             "polymarket_secret": model_cfg.get("polymarket_secret", self.polymarket_secret),
