@@ -10,6 +10,7 @@ CATEGORIES: dict[str, list[str]] = {
         r"\bsolana\b", r"\bsol\b", r"\btoken\b", r"\bdefi\b", r"\bnft\b",
         r"\bstablecoin\b", r"\bblockchain\b", r"\bcoinbase\b", r"\bbinance\b",
         r"\bcrypto\s*price\b", r"\bmarket\s*cap\b", r"\baltcoin\b",
+        r"\b\$150k\b", r"\b\$100k\b", r"\b\$1m\b", r"\bpump\.fun\b", r"\bairdrop\b",
     ],
     "crypto_short_term": [
         r"\b\d+\s*min(ute)?\b", r"\b5m\b", r"\b15m\b", r"\b1h\b", r"\b4h\b",
@@ -22,6 +23,10 @@ CATEGORIES: dict[str, list[str]] = {
         r"\bf1\b", r"\bformula\s*1\b", r"\bufc\b", r"\bmma\b", r"\bboxing\b",
         r"\bolympic\b", r"\bworld\s*cup\b", r"\bsuper\s*bowl\b", r"\bplayoff\b",
         r"\bchampion(ship)?\b", r"\bmatch\b", r"\bgame\s*\d\b",
+        r"\bpistons?\b", r"\blakers?\b", r"\bwarriors?\b", r"\bceltic\b", r"\bheat\b",
+        r"\bla\s*liga\b", r"\bpremier\s*league\b", r"\bchampions\s*league\b",
+        r"\bfifa\b", r"\brelegat", r"\barsenal\b", r"\bchelsea\b", r"\bliverpool\b",
+        r"\bwin\s*the\s*\d{4}\b", r"\bwin\s*the\s*nba\b", r"\bwin\s*the\s*super\b",
     ],
     "politics": [
         r"\belection\b", r"\bpresident\b", r"\bsenate\b", r"\bcongress\b",
@@ -38,6 +43,7 @@ CATEGORIES: dict[str, list[str]] = {
         r"\bweather\b", r"\btemperature\b", r"\bhurricane\b", r"\btornado\b",
         r"\bflood\b", r"\bsnow\b", r"\brain\b", r"\bheat\s*wave\b",
         r"\bwildfire\b", r"\bclimate\b", r"\bforecast\b.*\b(rain|snow|temp)\b",
+        r"\bdegrees?\b", r"\bcelsius\b", r"\bfahrenheit\b", r"\bstorm\b",
     ],
     "science_tech": [
         r"\bai\b", r"\bartificial\s*intelligence\b", r"\bmachine\s*learning\b",

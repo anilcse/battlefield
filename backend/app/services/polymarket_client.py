@@ -195,8 +195,8 @@ class PolymarketClient:
             }
 
         model_account = self.settings.get_model_account(model_name)
-        if model_name in self.settings.model_names and not self.settings.model_account_configs.get(model_name):
-            raise ValueError(f"Missing MODEL_ACCOUNT_CONFIGS entry for model: {model_name}")
+        if model_name in self.settings.model_names and not (model_account.get("private_key") or "").strip():
+            raise ValueError(f"Missing private_key for model {model_name} in MODEL_ACCOUNT_CONFIGS")
 
         if token_id:
             loop = asyncio.get_event_loop()

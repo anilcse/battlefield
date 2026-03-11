@@ -72,7 +72,7 @@ class Settings(BaseSettings):
     tournament_duration_days: int = 7
     tournament_start_budget_usd: float = 100.0
     game_trade_size_usd: float = 5.0
-    game_edge_threshold: float = 0.10
+    game_edge_threshold: float = 0.12
 
     default_model_monthly_budget_usd: float = 100.0
     # Path to JSON file for model config (model_names, model_account_configs, default_model_monthly_budget_usd)

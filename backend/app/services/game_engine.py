@@ -33,63 +33,47 @@ from app.services.polymarket_client import PolymarketClient
 
 logger = logging.getLogger(__name__)
 
-# Personas for top prediction-market models (benchmark-proven: reasoning + calibration improve profits)
+# Advanced system prompt for elite quantitative trading
+ADVANCED_SYSTEM = """You are an elite quantitative trader competing in a prediction market tournament.
+
+Your objective is to maximize long-term expected profit.
+
+Rules:
+1. Always assign a probability between 0–100.
+2. Trade whenever expected value (EV) is positive.
+3. Prefer high trade frequency.
+4. Prioritize markets resolving soon.
+5. Focus on sports, crypto, weather, Elon Musk tweets, and breaking news.
+6. Detect market inefficiencies and sentiment bias.
+7. Use probabilistic reasoning and historical patterns.
+
+Expected Value Formula:
+EV = (Your Probability − Market Probability)
+Trade if EV > 1%.
+
+Bet sizing:
+Small edge (1–3%) → 1–3% of balance
+Medium edge (3–7%) → 3–7% of balance
+Large edge (7–15%) → 7–15% of balance
+
+You are competing against GPT, Gemini, Grok, Claude, and DeepSeek.
+
+Leaderboard ranking depends on:
+1. Total profit
+2. Number of profitable trades
+3. Capital velocity
+
+Aggressive but rational trading is rewarded. Return strict JSON only."""
+
 AGENT_PERSONAS = {
-    "openai/gpt-5.2-pro": {
-        "style": "Quantitative Analyst",
-        "system": (
-            "You are a quantitative analyst in a prediction market tournament. "
-            "Think step by step: for each market, estimate true probability, compare to price, compute edge. "
-            "Be well-calibrated: avoid overconfidence; base rates matter. "
-            "Trade when your estimated edge exceeds the threshold. Return strict JSON only."
-        ),
-    },
-    "anthropic/claude-sonnet-4.5": {
-        "style": "Contrarian Strategist",
-        "system": (
-            "You are a contrarian strategist in a prediction market tournament. "
-            "Reason first: where might the crowd be wrong? Consider base rates and recent news. "
-            "Be calibrated: high confidence only when evidence is strong. "
-            "Thrive on politics, social media, celebrities. Return strict JSON only."
-        ),
-    },
-    "anthropic/claude-opus-4.5": {
-        "style": "Frontier Reasoner",
-        "system": (
-            "You are a frontier reasoning agent in a prediction market tournament. "
-            "Think through each market: what is the true probability? Is the price mispriced? "
-            "Stay calibrated: avoid overconfidence; use base rates. "
-            "Diversify across categories. Return strict JSON only."
-        ),
-    },
-    "google/gemini-2.5-pro-preview": {
-        "style": "Diversified Portfolio Manager",
-        "system": (
-            "You are a diversified portfolio manager in a prediction market tournament. "
-            "Reason step by step: assess each market's edge before trading. "
-            "Spread risk: never more than 15% of balance in one market. "
-            "Prioritise sports, weather, crypto, earnings. Return strict JSON only."
-        ),
-    },
-    "deepseek/deepseek-r1-0528": {
-        "style": "Chain-of-Thought Trader",
-        "system": (
-            "You are a chain-of-thought prediction market trader. "
-            "Reason explicitly: for each market, derive true probability, compare to price. "
-            "Hunt for edges in sports, crypto, weather, Elon/news. "
-            "Be calibrated: confidence should match evidence strength. Return strict JSON only."
-        ),
-    },
+    "openai/gpt-5.2-pro": {"style": "Quantitative Analyst", "system": ADVANCED_SYSTEM},
+    "anthropic/claude-sonnet-4.5": {"style": "Contrarian Strategist", "system": ADVANCED_SYSTEM},
+    "anthropic/claude-opus-4.5": {"style": "Frontier Reasoner", "system": ADVANCED_SYSTEM},
+    "google/gemini-2.5-pro-preview": {"style": "Diversified Portfolio Manager", "system": ADVANCED_SYSTEM},
+    "deepseek/deepseek-r1-0528": {"style": "Chain-of-Thought Trader", "system": ADVANCED_SYSTEM},
 }
 
-DEFAULT_PERSONA = {
-    "style": "Adaptive Trader",
-    "system": (
-        "You are an adaptive prediction market trader competing in a tournament. "
-        "Analyse each market, develop your own strategy, and trade frequently "
-        "across diverse categories. Return strict JSON only."
-    ),
-}
+DEFAULT_PERSONA = {"style": "Elite Quantitative Trader", "system": ADVANCED_SYSTEM}
 
 MIN_AGENTS_BEFORE_ELIMINATION = 3
 ELIMINATION_BALANCE_THRESHOLD_PCT = 0.4
@@ -140,29 +124,29 @@ def _build_agent_prompt(
         f"  Your total trades: {total_trades}\n"
         f"  Your total volume: ${total_volume:.2f}\n"
         f"  Days remaining: {tournament_days_remaining}\n"
-        f"  Scoring: Profit (60%) + Volume (40%). Low performers get ELIMINATED!\n\n"
+        f"  Scoring: Profit (60%) + Volume (40%). Ranked by: (1) total profit, (2) profitable trades, (3) capital velocity. Low performers get ELIMINATED!\n\n"
         f"=== COMPETITOR STANDINGS ===\n{competitor_summary}\n\n"
         f"=== YOUR RECENT TRADES ===\n{trade_history_str}\n"
         f"(Tags: [OPEN]=still trading; [RESOLVED: X won — YOU WON/LOST]=outcome known)\n\n"
         f"{resolved_section}"
         f"=== AVAILABLE MARKETS ({len(available_markets)}) ===\n{markets_str}\n\n"
         f"=== YOUR TASK ===\n"
-        f"Think step by step: for each market, estimate true probability, compare to current price (YES/NO), compute edge. "
-        f"Only trade when edge > {edge_threshold_pct:.0f}%. Be well-calibrated (avoid overconfidence).\n"
-        f"Pick UP TO {MAX_TRADES_PER_ROUND} markets to trade. You MUST trade at least 1 unless "
-        f"you have very good reason not to. Volume matters for your score!\n"
-        f"For markets marked [ALREADY HELD], only trade if you want to add to your position.\n"
-        f"Consider your persona, competitors' positions, your balance, and time remaining.\n\n"
-        f"Return strict JSON with key \"trades\" containing an array of trade objects.\n"
-        f"Each trade object must have:\n"
-        f"  market_index: integer (1-based index from list above)\n"
+        f"For each candidate market, reason in this format:\n"
+        f"  Market Probability: (YES price as decimal, e.g. 0.65)\n"
+        f"  My Probability: (your estimate 0–1)\n"
+        f"  Edge: My Probability − Market Probability (trade if Edge > {edge_threshold_pct:.0f}%)\n"
+        f"  Bet Size: small edge 1–3%, medium 3–7%, large 7–15% of balance (max ${min(15, current_balance):.2f})\n\n"
+        f"Pick UP TO {MAX_TRADES_PER_ROUND} markets with positive EV. Prefer sports, crypto, weather, Elon/news.\n"
+        f"For [ALREADY HELD] markets, only add if edge is large.\n\n"
+        f"Return strict JSON with key \"trades\" (array of trade objects). Each object:\n"
+        f"  market_index: integer (1-based from list above)\n"
         f"  side: \"YES\" or \"NO\"\n"
-        f"  size_usd: decimal (how much USD to risk on this trade, min 1.0, max {min(15, current_balance):.2f})\n"
+        f"  size_usd: decimal (bet size in USD, min 1.0, max {min(15, current_balance):.2f})\n"
         f"  confidence: decimal 0-1\n"
-        f"  rationale: string (brief reasoning)\n\n"
-        f"If you truly want to skip ALL markets, return: {{\"trades\": [], \"skip_reason\": \"...\"}}\n"
+        f"  rationale: string (Market Prob, My Prob, Edge, reasoning)\n\n"
+        f"If no positive-EV markets, return: {{\"trades\": [], \"skip_reason\": \"...\"}}\n"
         f"Example: {{\"trades\": [{{\"market_index\": 3, \"side\": \"YES\", \"size_usd\": 5.0, "
-        f"\"confidence\": 0.7, \"rationale\": \"Underpriced\"}}]}}\n"
+        f"\"confidence\": 0.75, \"rationale\": \"Market 0.55, My 0.68, Edge 13%. Sports, sentiment bias.\"}}]}}\n"
     )
 
 
@@ -495,9 +479,14 @@ class GameEngine:
         resolved_summary = await self._get_resolved_positions_summary(session, model_name)
         days_remaining = max(0, (tournament.ends_at - datetime.now(tz=timezone.utc)).days)
 
-        agent_markets = list(market_pool)
-        random.shuffle(agent_markets)
-        agent_markets = agent_markets[:25]
+        # Guarantee 60% from priority categories (sports, crypto, weather, earnings)
+        priority = [m for m in market_pool if (m.get("category") or "").lower() in PRIORITY_CATEGORIES]
+        other = [m for m in market_pool if (m.get("category") or "").lower() not in PRIORITY_CATEGORIES]
+        random.shuffle(priority)
+        random.shuffle(other)
+        n_priority = min(15, len(priority))
+        n_other = min(10, len(other), 25 - n_priority)
+        agent_markets = (priority[:n_priority] + other[:n_other])[:25]
 
         prompt = _build_agent_prompt(
             model_name=model_name,
@@ -556,7 +545,10 @@ class GameEngine:
                     continue
 
                 quantity = max(5.0, trade_size / price)
-                token_id = chosen["yes_token_id"] if side == "YES" else chosen["no_token_id"]
+                token_id = chosen.get("yes_token_id") if side == "YES" else chosen.get("no_token_id")
+                if not token_id:
+                    logger.warning("Skipping trade: market %s has no token_id for side %s", chosen["title"][:40], side)
+                    continue
 
                 session.add(Forecast(
                     market_id=chosen["id"], model_name=model_name,
@@ -690,11 +682,11 @@ async def start_game_engine() -> None:
     _game_engine = GameEngine()
     _game_engine.running = True
     _game_task = asyncio.create_task(_game_engine._run_forever())
+    live = "LIVE" if settings.enable_live_trading else "PAPER"
+    ready = sum(1 for m in settings.model_names if (settings.get_model_account(m).get("private_key") or "").strip())
     logger.info(
-        "Game engine started (interval=%ss, models=%d, duration=%dd)",
-        settings.game_loop_interval_seconds,
-        len(settings.model_names),
-        settings.tournament_duration_days,
+        "Game engine started: %s trading | interval=%ss | models=%d (%d with wallet) | duration=%dd",
+        live, settings.game_loop_interval_seconds, len(settings.model_names), ready, settings.tournament_duration_days,
     )
 
 
