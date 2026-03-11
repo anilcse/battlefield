@@ -276,8 +276,7 @@ async def dashboard() -> str:
           else badge = `${idx + 1}`;
           const retClass = row.total_return_pct >= 0 ? "green" : "red";
           const scoreClass = (row.composite_score || 0) >= 0 ? "green" : "red";
-          const statusLabel = row.eliminated ? '<span class="badge" style="background:#2a1a10;color:#ff6b6b">ELIMINATED</span>' : '<span class="badge" style="background:#1a2a10;color:#3ddc97">ACTIVE</span>';
-          if (row.eliminated) badge = '<span style="color:#ff6b6b">EL</span>';
+          const statusLabel = '<span class="badge" style="background:#1a2a10;color:#3ddc97">ACTIVE</span>';
           tr.innerHTML = `
             <td>${badge}</td>
             <td><span class="pill">${row.model_name}</span></td>

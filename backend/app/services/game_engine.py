@@ -6,7 +6,6 @@ Each agent:
   - Sees its own trade history, portfolio, AND competitor standings
   - Independently selects which markets to trade (from a diverse shuffled pool)
   - Can trade multiple markets per round (up to 3)
-  - Gets eliminated if underperforming at checkpoints
   - Ranking uses composite score: 60% profit + 40% volume
 """
 import asyncio
@@ -75,8 +74,6 @@ AGENT_PERSONAS = {
 
 DEFAULT_PERSONA = {"style": "Elite Quantitative Trader", "system": ADVANCED_SYSTEM}
 
-MIN_AGENTS_BEFORE_ELIMINATION = 3
-ELIMINATION_BALANCE_THRESHOLD_PCT = 0.4
 MAX_TRADES_PER_ROUND = 3
 
 
@@ -124,7 +121,7 @@ def _build_agent_prompt(
         f"  Your total trades: {total_trades}\n"
         f"  Your total volume: ${total_volume:.2f}\n"
         f"  Days remaining: {tournament_days_remaining}\n"
-        f"  Scoring: Profit (60%) + Volume (40%). Ranked by: (1) total profit, (2) profitable trades, (3) capital velocity. Low performers get ELIMINATED!\n\n"
+        f"  Scoring: Profit (60%) + Volume (40%). Ranked by: (1) total profit, (2) profitable trades, (3) capital velocity.\n\n"
         f"=== COMPETITOR STANDINGS ===\n{competitor_summary}\n\n"
         f"=== YOUR RECENT TRADES ===\n{trade_history_str}\n"
         f"(Tags: [OPEN]=still trading; [RESOLVED: X won — YOU WON/LOST]=outcome known)\n\n"
@@ -240,24 +237,20 @@ class GameEngine:
         return tournament
 
     async def _rank_entries(self, session: AsyncSession, tournament_id: int) -> None:
-        """Rank active (non-eliminated) entries by composite score: 60% profit + 40% volume."""
+        """Rank all entries by composite score: 60% profit + 40% volume."""
         result = await session.execute(
             select(TournamentEntry).where(TournamentEntry.tournament_id == tournament_id)
         )
         all_entries = list(result.scalars().all())
 
-        active = [e for e in all_entries if e.rank != -1]
-        eliminated = [e for e in all_entries if e.rank == -1]
-
-        if not active:
+        if not all_entries:
             return
 
-        max_balance = max(e.current_balance_usd for e in active)
-        max_volume = max((e.total_volume_usd for e in active), default=1.0) or 1.0
-        start_b = active[0].starting_balance_usd or 100.0
+        max_volume = max((e.total_volume_usd for e in all_entries), default=1.0) or 1.0
+        start_b = all_entries[0].starting_balance_usd or 100.0
 
         scored = []
-        for e in active:
+        for e in all_entries:
             profit_score = (e.current_balance_usd - start_b) / start_b
             volume_score = e.total_volume_usd / max_volume
             composite = 0.6 * profit_score + 0.4 * volume_score
@@ -373,9 +366,7 @@ class GameEngine:
     def _build_competitor_summary(self, entries: list[TournamentEntry], current_model: str) -> str:
         lines = []
         for e in entries:
-            if e.rank == -1:
-                status = "ELIMINATED"
-            elif e.model_name == current_model:
+            if e.model_name == current_model:
                 status = "← YOU"
             else:
                 status = f"Rank #{e.rank or '?'}"
@@ -423,7 +414,7 @@ class GameEngine:
             trades = list(result.scalars().all())
             for trade in trades:
                 entry = await self._get_entry(session, tournament.id, trade.model_name)
-                if not entry or entry.rank == -1:
+                if not entry:
                     continue
 
                 won = (trade.side == "YES" and yes_won) or (trade.side == "NO" and no_won)
@@ -436,29 +427,6 @@ class GameEngine:
 
             await session.commit()
 
-    async def _eliminate_underperformers(self, session: AsyncSession, tournament: Tournament) -> None:
-        result = await session.execute(
-            select(TournamentEntry)
-            .where(
-                TournamentEntry.tournament_id == tournament.id,
-                TournamentEntry.rank != -1,
-            )
-            .order_by(TournamentEntry.current_balance_usd.desc())
-        )
-        active_entries = list(result.scalars().all())
-        if len(active_entries) <= MIN_AGENTS_BEFORE_ELIMINATION:
-            return
-
-        worst = active_entries[-1]
-        loss_pct = (worst.starting_balance_usd - worst.current_balance_usd) / worst.starting_balance_usd
-        if loss_pct >= ELIMINATION_BALANCE_THRESHOLD_PCT:
-            worst.rank = -1
-            logger.info(
-                "ELIMINATED: model=%s balance=$%.2f (lost %.0f%% of $%.0f)",
-                worst.model_name, worst.current_balance_usd,
-                loss_pct * 100, worst.starting_balance_usd,
-            )
-
     async def _run_agent_round(
         self,
         session: AsyncSession,
@@ -468,7 +436,7 @@ class GameEngine:
         all_entries: list[TournamentEntry],
     ) -> None:
         entry = await self._get_entry(session, tournament.id, model_name)
-        if entry is None or entry.current_balance_usd <= 1.0 or entry.rank == -1:
+        if entry is None or entry.current_balance_usd <= 1.0:
             return
 
         persona = _get_persona(model_name)
@@ -640,7 +608,7 @@ class GameEngine:
 
             active_models = [
                 e.model_name for e in all_entries
-                if e.rank != -1 and e.current_balance_usd > 1.0
+                if e.current_balance_usd > 1.0
             ]
 
             logger.info(
@@ -651,7 +619,6 @@ class GameEngine:
             for model_name in active_models:
                 await self._run_agent_round(session, tournament, model_name, market_pool, all_entries)
 
-            await self._eliminate_underperformers(session, tournament)
             await self._rank_entries(session, tournament.id)
             await session.commit()
 

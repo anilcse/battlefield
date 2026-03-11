@@ -266,18 +266,15 @@ async def leaderboard(db: AsyncSession = Depends(get_db)) -> dict:
     )
     all_entries = list(e_result.scalars().all())
 
-    active = [e for e in all_entries if e.rank != -1]
-    eliminated = [e for e in all_entries if e.rank == -1]
     start_b = tournament.start_budget_usd or 100.0
-    max_vol = max((e.total_volume_usd for e in active), default=1.0) or 1.0
+    max_vol = max((e.total_volume_usd for e in all_entries), default=1.0) or 1.0
 
     def _composite(e: TournamentEntry) -> float:
         profit_score = (e.current_balance_usd - start_b) / start_b
         volume_score = e.total_volume_usd / max_vol
         return 0.6 * profit_score + 0.4 * volume_score
 
-    active.sort(key=_composite, reverse=True)
-    sorted_entries = active + eliminated
+    sorted_entries = sorted(all_entries, key=_composite, reverse=True)
 
     now = datetime.now(tz=timezone.utc)
     elapsed = (now - tournament.started_at).total_seconds()
@@ -297,7 +294,7 @@ async def leaderboard(db: AsyncSession = Depends(get_db)) -> dict:
         },
         "entries": [
             {
-                "rank": "EL" if entry.rank == -1 else idx + 1,
+                "rank": idx + 1,
                 "model_name": entry.model_name,
                 "starting_balance_usd": entry.starting_balance_usd,
                 "current_balance_usd": round(entry.current_balance_usd, 4),
@@ -313,7 +310,6 @@ async def leaderboard(db: AsyncSession = Depends(get_db)) -> dict:
                 "total_volume_usd": round(getattr(entry, "total_volume_usd", 0.0), 4),
                 "realized_pnl_usd": round(entry.realized_pnl_usd, 4),
                 "unrealized_pnl_usd": round(entry.unrealized_pnl_usd, 4),
-                "eliminated": entry.rank == -1,
             }
             for idx, entry in enumerate(sorted_entries)
         ],

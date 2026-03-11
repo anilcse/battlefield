@@ -135,13 +135,15 @@ class Settings(BaseSettings):
                 if model_cfg is not None:
                     break
         model_cfg = model_cfg or {}
+        pk = (model_cfg.get("private_key") or "").strip() or self.private_key
+        wa = (model_cfg.get("wallet_address") or "").strip() or self.wallet_address
         return {
-            "polymarket_api_key": model_cfg.get("polymarket_api_key", self.polymarket_api_key),
-            "polymarket_secret": model_cfg.get("polymarket_secret", self.polymarket_secret),
-            "polymarket_passphrase": model_cfg.get("polymarket_passphrase", self.polymarket_passphrase),
-            "private_key": model_cfg.get("private_key", self.private_key),
-            "wallet_address": model_cfg.get("wallet_address", self.wallet_address),
-            "signature_type": model_cfg.get("signature_type", str(self.polymarket_signature_type)),
+            "polymarket_api_key": model_cfg.get("polymarket_api_key") or self.polymarket_api_key,
+            "polymarket_secret": model_cfg.get("polymarket_secret") or self.polymarket_secret,
+            "polymarket_passphrase": model_cfg.get("polymarket_passphrase") or self.polymarket_passphrase,
+            "private_key": (pk or "").strip(),
+            "wallet_address": (wa or "").strip() or None,
+            "signature_type": model_cfg.get("signature_type") or str(self.polymarket_signature_type),
         }
 
 
