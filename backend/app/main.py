@@ -37,6 +37,16 @@ async def create_tables(db_engine: AsyncEngine) -> None:
     async with db_engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
     await _add_missing_columns(db_engine)
+    await _reset_eliminated_entries(db_engine)
+
+
+async def _reset_eliminated_entries(db_engine: AsyncEngine) -> None:
+    """Reset any ELIMINATED (rank=-1) tournament entries to active on startup."""
+    try:
+        async with db_engine.begin() as conn:
+            await conn.execute(text("UPDATE tournament_entries SET rank = NULL WHERE rank = -1"))
+    except Exception:
+        pass  # Table may not exist on first run
 
 
 async def _add_missing_columns(db_engine: AsyncEngine) -> None:
